@@ -1,0 +1,73 @@
+---
+- name: SAIL - Sync Morpheus Tags to SRX Address Book
+  hosts: vsrx
+  gather_facts: no
+  collections:
+    - junipernetworks.junos
+
+  vars:
+    morpheus_url: "https://"
+    vsrx_ip: "{{ lookup('env', 'VSRX_IP') }}"
+    morpheus_token: "{{ lookup('env', 'MORPHEUS_TOKEN') }}"
+    tag_to_set_map:
+      Web: SET_WEB
+      DB: SET_DB
+
+  tasks:
+
+    - name: Query Morpheus for Web-tagged VMs
+      uri:
+        url: "{{ morpheus_url }}/api/instances?tags=AppTier:Web&max=500"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ morpheus_token }}"
+        validate_certs: no
+      register: web_result
+      delegate_to: localhost
+
+    - name: Query Morpheus for DB-tagged VMs
+      uri:
+        url: "{{ morpheus_url }}/api/instances?tags=AppTier:DB&max=500"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ morpheus_token }}"
+        validate_certs: no
+      register: db_result
+      delegate_to: localhost
+
+    - name: Build IP lists
+      set_fact:
+        web_ips: "{{ web_result.json.instances | map(attribute='connectionInfo') | map(attribute='0') | map(attribute='ip') | list }}"
+        db_ips: "{{ db_result.json.instances | map(attribute='connectionInfo') | map(attribute='0') | map(attribute='ip') | list }}"
+
+    - name: Sync SET_WEB to SRX
+      junipernetworks.junos.junos_address_book:
+        config:
+          - name: MORPHEUS_MANAGED
+            addresses: "{{ web_ips | map('regex_replace', '^(.+)$', '\\1 \\1/32') | list }}"
+            address_sets:
+              - name: SET_WEB
+                addresses: "{{ web_ips }}"
+        state: overridden
+      when: web_ips | length > 0
+
+    - name: Sync SET_DB to SRX
+      junipernetworks.junos.junos_address_book:
+        config:
+          - name: MORPHEUS_MANAGED
+            addresses: "{{ db_ips | map('regex_replace', '^(.+)$', '\\1 \\1/32') | list }}"
+            address_sets:
+              - name: SET_DB
+                addresses: "{{ db_ips }}"
+        state: overridden
+      when: db_ips | length > 0
+
+    - name: Validate - show final SRX address book
+      junipernetworks.junos.junos_command:
+        commands:
+          - show configuration security address-book MORPHEUS_MANAGED | display set
+      register: validation
+
+    - name: Print result to Morpheus task log
+      debug:
+        msg: "{{ validation.stdout_lines }}"
