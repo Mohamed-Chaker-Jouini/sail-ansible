@@ -18,36 +18,34 @@
         ansible_network_os: junos
         ansible_netconf_port: 830
 
-    - name: Query Morpheus for Web-tagged VMs
+    - name: Query Morpheus for ALL AppTier tagged VMs
       uri:
-        url: "{{ morpheus_url }}/api/instances?tags=AppTier:Web&max=500"
+        # Fetching all instances that have the AppTier key. 
+        # We will filter the specific Web/DB values client-side.
+        url: "{{ morpheus_url }}/api/instances?tagName=AppTier&max=500"
         method: GET
         headers:
           Authorization: "Bearer {{ morpheus_token }}"
         validate_certs: no
-      register: web_result
+      register: morpheus_result
 
-    - name: Query Morpheus for DB-tagged VMs
-      uri:
-        url: "{{ morpheus_url }}/api/instances?tags=AppTier:DB&max=500"
-        method: GET
-        headers:
-          Authorization: "Bearer {{ morpheus_token }}"
-        validate_certs: no
-      register: db_result
-
-    - name: Build IP lists
+    - name: Build precise IP lists via client-side JSON filtering
       set_fact:
-        web_ips: "{{ web_result.json.instances | map(attribute='connectionInfo') | map(attribute='0') | map(attribute='ip') | list }}"
-        db_ips: "{{ db_result.json.instances | map(attribute='connectionInfo') | map(attribute='0') | map(attribute='ip') | list }}"
+        # json_query strictly checks the nested tags array for an exact name AND value match
+        # reject('none') ensures we don't accidentally add null values if connectionInfo is empty
+        web_ips: "{{ morpheus_result.json | json_query(web_query) | reject('none') | list }}"
+        db_ips: "{{ morpheus_result.json | json_query(db_query) | reject('none') | list }}"
+      vars:
+        web_query: "instances[?tags[?name=='AppTier' && value=='Web']].connectionInfo[0].ip"
+        db_query: "instances[?tags[?name=='AppTier' && value=='DB']].connectionInfo[0].ip"
 
-    - name: Print IPs found for debugging
+    - name: Print validated IPs for debugging
       debug:
         msg:
-          - "Web IPs from Morpheus: {{ web_ips }}"
-          - "DB IPs from Morpheus: {{ db_ips }}"
+          - "Strictly Filtered Web IPs: {{ web_ips }}"
+          - "Strictly Filtered DB IPs: {{ db_ips }}"
 
-    - name: Pass IP lists to vsrx host
+    - name: Pass validated IP lists to vsrx host
       add_host:
         name: vsrx
         web_ips: "{{ web_ips }}"
@@ -68,6 +66,8 @@
           - "set security address-book MORPHEUS_MANAGED address-set SET_WEB address {{ item }}"
         confirm: 1
       loop: "{{ web_ips }}"
+      # Skip task if the list is empty to prevent Juniper commit errors
+      when: web_ips | length > 0
 
     - name: Sync SET_DB addresses to SRX
       junipernetworks.junos.junos_config:
@@ -76,6 +76,7 @@
           - "set security address-book MORPHEUS_MANAGED address-set SET_DB address {{ item }}"
         confirm: 1
       loop: "{{ db_ips }}"
+      when: db_ips | length > 0
 
     - name: Validate - show current SRX address book
       junipernetworks.junos.junos_command:
