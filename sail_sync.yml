@@ -1,15 +1,26 @@
 ---
+# Play 1: runs on localhost, builds the dynamic inventory
+- name: Setup dynamic inventory
+  hosts: localhost
+  gather_facts: no
+
+  tasks:
+    - name: Add vSRX to inventory dynamically
+      add_host:
+        name: vsrx
+        ansible_host: "{{ vsrx_ip }}"
+        ansible_user: admin
+        ansible_password: "{{ vsrx_password }}"
+        ansible_connection: netconf
+        ansible_network_os: junos
+        ansible_netconf_port: 830
+
+# Play 2: runs on the dynamically added vsrx host
 - name: SAIL - Sync Morpheus Tags to SRX Address Book
   hosts: vsrx
   gather_facts: no
   collections:
     - junipernetworks.junos
-
-  vars:
-    morpheus_url: "https://{{ morpheus_ip }}"
-    tag_to_set_map:
-      Web: SET_WEB
-      DB: SET_DB
 
   tasks:
 
@@ -38,27 +49,11 @@
         web_ips: "{{ web_result.json.instances | map(attribute='connectionInfo') | map(attribute='0') | map(attribute='ip') | list }}"
         db_ips: "{{ db_result.json.instances | map(attribute='connectionInfo') | map(attribute='0') | map(attribute='ip') | list }}"
 
-    - name: Sync SET_WEB to SRX
-      junipernetworks.junos.junos_address_book:
-        config:
-          - name: MORPHEUS_MANAGED
-            addresses: "{{ web_ips | map('regex_replace', '^(.+)$', '\\1 \\1/32') | list }}"
-            address_sets:
-              - name: SET_WEB
-                addresses: "{{ web_ips }}"
-        state: overridden
-      when: web_ips | length > 0
-
-    - name: Sync SET_DB to SRX
-      junipernetworks.junos.junos_address_book:
-        config:
-          - name: MORPHEUS_MANAGED
-            addresses: "{{ db_ips | map('regex_replace', '^(.+)$', '\\1 \\1/32') | list }}"
-            address_sets:
-              - name: SET_DB
-                addresses: "{{ db_ips }}"
-        state: overridden
-      when: db_ips | length > 0
+    - name: Print IPs found for debugging
+      debug:
+        msg:
+          - "Web IPs from Morpheus: {{ web_ips }}"
+          - "DB IPs from Morpheus: {{ db_ips }}"
 
     - name: Validate - show final SRX address book
       junipernetworks.junos.junos_command:
@@ -66,6 +61,6 @@
           - show configuration security address-book MORPHEUS_MANAGED | display set
       register: validation
 
-    - name: Print result to Morpheus task log
+    - name: Print SRX state to log
       debug:
         msg: "{{ validation.stdout_lines }}"
