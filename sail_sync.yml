@@ -61,6 +61,22 @@
 
   tasks:
 
+    - name: Sync SET_WEB addresses to SRX
+      junipernetworks.junos.junos_config:
+        lines:
+          - "set security address-book MORPHEUS_MANAGED address {{ item }} {{ item }}/32"
+          - "set security address-book MORPHEUS_MANAGED address-set SET_WEB address {{ item }}"
+        confirm: 1
+      loop: "{{ web_ips }}"
+
+    - name: Sync SET_DB addresses to SRX
+      junipernetworks.junos.junos_config:
+        lines:
+          - "set security address-book MORPHEUS_MANAGED address {{ item }} {{ item }}/32"
+          - "set security address-book MORPHEUS_MANAGED address-set SET_DB address {{ item }}"
+        confirm: 1
+      loop: "{{ db_ips }}"
+
     - name: Validate - show current SRX address book
       junipernetworks.junos.junos_command:
         commands:
