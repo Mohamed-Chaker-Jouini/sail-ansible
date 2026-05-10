@@ -12,7 +12,7 @@
       add_host:
         name: vsrx
         ansible_host: "{{ vsrx_ip }}"
-        ansible_user: admin
+        ansible_user: root
         ansible_password: "{{ vsrx_password }}"
         ansible_connection: netconf
         ansible_network_os: junos
