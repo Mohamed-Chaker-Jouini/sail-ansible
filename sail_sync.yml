@@ -6,7 +6,7 @@
     - junipernetworks.junos
 
   vars:
-    morpheus_url: "https://"
+    morpheus_url: "https://{{ lookup('env', 'MORPHEUS_IP') }}"
     vsrx_ip: "{{ lookup('env', 'VSRX_IP') }}"
     morpheus_token: "{{ lookup('env', 'MORPHEUS_TOKEN') }}"
     tag_to_set_map:
