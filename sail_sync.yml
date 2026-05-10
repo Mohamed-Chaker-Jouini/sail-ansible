@@ -1,10 +1,13 @@
 ---
-# Play 1: runs on localhost, builds the dynamic inventory
-- name: Setup dynamic inventory
+- name: Setup dynamic inventory and gather data
   hosts: localhost
   gather_facts: no
 
+  vars:
+    morpheus_url: "https://{{ morpheus_ip }}"
+
   tasks:
+
     - name: Add vSRX to inventory dynamically
       add_host:
         name: vsrx
@@ -15,15 +18,6 @@
         ansible_network_os: junos
         ansible_netconf_port: 830
 
-# Play 2: runs on the dynamically added vsrx host
-- name: SAIL - Sync Morpheus Tags to SRX Address Book
-  hosts: vsrx
-  gather_facts: no
-  collections:
-    - junipernetworks.junos
-
-  tasks:
-
     - name: Query Morpheus for Web-tagged VMs
       uri:
         url: "{{ morpheus_url }}/api/instances?tags=AppTier:Web&max=500"
@@ -32,7 +26,6 @@
           Authorization: "Bearer {{ morpheus_token }}"
         validate_certs: no
       register: web_result
-      delegate_to: localhost
 
     - name: Query Morpheus for DB-tagged VMs
       uri:
@@ -42,7 +35,6 @@
           Authorization: "Bearer {{ morpheus_token }}"
         validate_certs: no
       register: db_result
-      delegate_to: localhost
 
     - name: Build IP lists
       set_fact:
@@ -55,7 +47,21 @@
           - "Web IPs from Morpheus: {{ web_ips }}"
           - "DB IPs from Morpheus: {{ db_ips }}"
 
-    - name: Validate - show final SRX address book
+    - name: Pass IP lists to vsrx host
+      add_host:
+        name: vsrx
+        web_ips: "{{ web_ips }}"
+        db_ips: "{{ db_ips }}"
+
+- name: SAIL - Enforce state on SRX
+  hosts: vsrx
+  gather_facts: no
+  collections:
+    - junipernetworks.junos
+
+  tasks:
+
+    - name: Validate - show current SRX address book
       junipernetworks.junos.junos_command:
         commands:
           - show configuration security address-book MORPHEUS_MANAGED | display set
