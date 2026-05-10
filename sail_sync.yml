@@ -64,7 +64,7 @@
     - name: Validate - show current SRX address book
       junipernetworks.junos.junos_command:
         commands:
-          - show configuration security address-book MORPHEUS_MANAGED | display set
+          - show configuration security address-book MORPHEUS_MANAGED
       register: validation
 
     - name: Print SRX state to log
