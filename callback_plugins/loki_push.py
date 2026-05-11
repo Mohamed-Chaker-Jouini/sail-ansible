@@ -22,6 +22,7 @@ DOCUMENTATION = """
     options:
       loki_url:
         description: Base URL of your Loki instance (no trailing slash)
+        type: str
         ini:
           - section: callback_loki_push
             key: loki_url
@@ -51,7 +52,9 @@ class CallbackModule(CallbackBase):
     CALLBACK_VERSION = 2.0
     CALLBACK_TYPE = "notification"
     CALLBACK_NAME = "loki_push"
-    CALLBACK_NEEDS_ENABLED = True
+    # False so Morpheus doesn't need to do anything special to enable it —
+    # presence in callbacks_enabled in ansible.cfg is sufficient.
+    CALLBACK_NEEDS_ENABLED = False
 
     def __init__(self):
         super().__init__()
@@ -62,18 +65,18 @@ class CallbackModule(CallbackBase):
 
     def set_options(self, task_keys=None, var_options=None, direct=None):
         super().set_options(task_keys=task_keys, var_options=var_options, direct=direct)
-        
-        # Safely handle missing options to prevent NoneType crashes
+
         url = self.get_option("loki_url")
         self._loki_url = url.rstrip("/") if url else None
-        
+
         timeout = self.get_option("loki_timeout")
         try:
             self._timeout = int(timeout) if timeout else 5
-        except ValueError:
+        except (ValueError, TypeError):
             self._timeout = 5
 
-        # Inject no_proxy safely so urllib skips the corporate proxy for Loki's IP
+        # Inject no_proxy so urllib skips the corporate proxy for Loki's IP.
+        # urllib does NOT support CIDR notation — explicit IP is required here.
         no_proxy = self.get_option("no_proxy")
         if no_proxy:
             existing = os.environ.get("no_proxy", os.environ.get("NO_PROXY", ""))
@@ -82,7 +85,7 @@ class CallbackModule(CallbackBase):
             os.environ["NO_PROXY"] = merged
 
     # ------------------------------------------------------------------ #
-    # Internal helpers                                                   #
+    # Internal helpers                                                     #
     # ------------------------------------------------------------------ #
 
     def _push(self, labels: dict, message: str) -> None:
@@ -91,15 +94,14 @@ class CallbackModule(CallbackBase):
         if not self._loki_url:
             return
 
-        # Use time_ns() for exact nanosecond precision to prevent Loki out-of-order errors
+        # time_ns() gives exact nanoseconds — prevents Loki out-of-order rejections
         ts = str(time.time_ns())
 
-        # Merge in standard SAIL labels
         base_labels = {
             "job":     "ansible",
             "project": "SAIL",
         }
-        # Filter out empty values from dynamic labels to keep Grafana clean
+        # Only include labels that have a non-empty value — keeps Grafana streams clean
         base_labels.update({k: v for k, v in labels.items() if v})
 
         payload = {
@@ -121,65 +123,57 @@ class CallbackModule(CallbackBase):
             )
             with urllib.request.urlopen(req, timeout=self._timeout):
                 pass
-        except Exception:
-            # Broad catch handles URLError, HTTPError, timeouts, and malformed URLs
-            # Never let observability failure break the automation run
-            pass
+        except Exception as e:
+            # Surface to Ansible's display at vvv so it's visible when running
+            # with -vvv but never raises — observability must not break automation.
+            self._display.vvv(f"loki_push: failed to send to {self._loki_url}: {e}")
 
     def _task_labels(self, task, host=None, status="unknown") -> dict:
-        """Construct safe labels for a task event."""
-        # Safely extract role name if it exists, without str() casting the object memory address
-        role_name = task._role.get_name() if getattr(task, '_role', None) else None
-
+        role_name = task._role.get_name() if getattr(task, "_role", None) else None
         labels = {
             "playbook": self._playbook_name,
             "play":     self._play_name,
-            "task":     getattr(task, 'name', "unnamed") or "unnamed",
+            "task":     getattr(task, "name", "unnamed") or "unnamed",
             "status":   status,
         }
-        
         if role_name:
             labels["role"] = role_name
         if host:
             labels["host"] = str(host)
-            
         return labels
 
     def _result_msg(self, result) -> str:
-        """Extract a clean human-readable message from a task result safely."""
-        res = getattr(result, '_result', {})
-        
-        # Ensure we are parsing a dictionary (prevents TypeError on hard crashes/plain string returns)
+        res = getattr(result, "_result", {})
         if not isinstance(res, dict):
             return str(res)[:500]
-            
         parts = []
         if "msg" in res:
             parts.append(str(res["msg"]))
         if "stdout_lines" in res:
-            parts.extend([str(line) for line in res["stdout_lines"]])
+            parts.extend(str(line) for line in res["stdout_lines"])
         elif "stdout" in res and res["stdout"]:
             parts.append(str(res["stdout"]))
         if "stderr" in res and res["stderr"]:
             parts.append(f"stderr: {res['stderr']}")
         if "reason" in res:
             parts.append(str(res["reason"]))
-            
         return " | ".join(parts) if parts else json.dumps(res, default=str)[:500]
 
     # ------------------------------------------------------------------ #
-    # Playbook lifecycle                                                 #
+    # Playbook lifecycle                                                   #
     # ------------------------------------------------------------------ #
 
     def v2_playbook_on_start(self, playbook):
         self._playbook_name = playbook._file_name or "unknown"
+        # Canary line — if this appears in Grafana the plugin loaded and
+        # the proxy bypass is working correctly end-to-end.
         self._push(
             {"status": "started", "playbook": self._playbook_name},
-            f"Playbook started: {self._playbook_name}",
+            f"[SAIL] loki_push loaded OK | target={self._loki_url} | playbook={self._playbook_name}",
         )
 
     def v2_playbook_on_play_start(self, play):
-        # Native hook to track the play name safely rather than traversing parent properties
+        # Dedicated hook — avoids fragile _parent traversal used in the original
         self._play_name = play.get_name()
 
     def v2_playbook_on_stats(self, stats):
@@ -200,11 +194,12 @@ class CallbackModule(CallbackBase):
             )
 
     # ------------------------------------------------------------------ #
-    # Task results                                                       #
+    # Task results                                                         #
     # ------------------------------------------------------------------ #
 
     def v2_runner_on_ok(self, result):
-        changed = getattr(result, '_result', {}).get("changed", False) if isinstance(getattr(result, '_result', None), dict) else False
+        res = getattr(result, "_result", {})
+        changed = res.get("changed", False) if isinstance(res, dict) else False
         status = "changed" if changed else "ok"
         self._push(
             self._task_labels(result._task, result._host.name, status),
