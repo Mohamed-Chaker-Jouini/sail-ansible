@@ -36,15 +36,6 @@ DOCUMENTATION = """
           - section: callback_loki_push
             key: loki_timeout
         default: 5
-      no_proxy:
-        description: Comma-separated hosts/IPs to bypass the system proxy
-        type: str
-        ini:
-          - section: callback_loki_push
-            key: no_proxy
-        env:
-          - name: NO_PROXY
-        default: ""
 """
 
 
@@ -52,11 +43,28 @@ class CallbackModule(CallbackBase):
     CALLBACK_VERSION = 2.0
     CALLBACK_TYPE = "notification"
     CALLBACK_NAME = "loki_push"
-    # False so Morpheus doesn't need to do anything special to enable it —
-    # presence in callbacks_enabled in ansible.cfg is sufficient.
     CALLBACK_NEEDS_ENABLED = False
 
+    # Loki IP injected at class load time — before urllib is imported by
+    # anything else and before Morpheus's http_proxy env vars take effect.
+    # CIDR ranges in no_proxy are ignored by Python's urllib, so we must
+    # use the explicit IP here regardless of what Morpheus sets.
+    _LOKI_IP = "10.202.52.109"
+
+    @staticmethod
+    def _patch_no_proxy():
+        """Extend no_proxy with the explicit Loki IP at the earliest possible
+        moment so urllib never routes Loki traffic through the corporate proxy."""
+        for key in ("no_proxy", "NO_PROXY"):
+            existing = os.environ.get(key, "")
+            ips = [s.strip() for s in existing.split(",") if s.strip()]
+            if CallbackModule._LOKI_IP not in ips:
+                ips.append(CallbackModule._LOKI_IP)
+            os.environ[key] = ",".join(ips)
+
     def __init__(self):
+        # Patch no_proxy FIRST — before super().__init__() touches anything
+        self._patch_no_proxy()
         super().__init__()
         self._loki_url = None
         self._timeout = 5
@@ -75,14 +83,9 @@ class CallbackModule(CallbackBase):
         except (ValueError, TypeError):
             self._timeout = 5
 
-        # Inject no_proxy so urllib skips the corporate proxy for Loki's IP.
-        # urllib does NOT support CIDR notation — explicit IP is required here.
-        no_proxy = self.get_option("no_proxy")
-        if no_proxy:
-            existing = os.environ.get("no_proxy", os.environ.get("NO_PROXY", ""))
-            merged = ",".join(filter(None, [existing, str(no_proxy)]))
-            os.environ["no_proxy"] = merged
-            os.environ["NO_PROXY"] = merged
+        # Belt-and-suspenders: re-apply after set_options in case Ansible
+        # or Morpheus mutated the environment between __init__ and here.
+        self._patch_no_proxy()
 
     # ------------------------------------------------------------------ #
     # Internal helpers                                                     #
