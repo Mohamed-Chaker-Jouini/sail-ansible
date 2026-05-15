@@ -2,3 +2,4 @@
 collections:
   - name: community.general
   - name: junipernetworks.junos
+    version: ">=2.1.0"

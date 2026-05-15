@@ -1,14 +1,10 @@
 ---
-- name: Setup dynamic inventory and gather data
+- name: Phase 1 — Gather desired state from Morpheus
   hosts: localhost
   gather_facts: no
-
-  vars:
-    morpheus_url: "https://{{ morpheus_ip }}"
-
   tasks:
 
-    - name: Add vSRX to inventory dynamically
+    - name: Add vSRX to inventory
       add_host:
         name: vsrx
         ansible_host: "{{ vsrx_ip }}"
@@ -18,40 +14,35 @@
         ansible_network_os: junos
         ansible_netconf_port: 830
 
-    - name: Query Morpheus for ALL AppTier tagged VMs
+    - name: Query Morpheus for all AppTier-tagged instances
       uri:
-        # Fetching all instances that have the AppTier key. 
-        # We will filter the specific Web/DB values client-side.
-        url: "{{ morpheus_url }}/api/instances?tagName=AppTier&max=500"
+        url: "https://{{ morpheus_ip }}/api/instances?tagName=AppTier&max=500"
         method: GET
         headers:
           Authorization: "Bearer {{ morpheus_token }}"
         validate_certs: no
       register: morpheus_result
 
-    - name: Build precise IP lists via client-side JSON filtering
+    - name: Build desired IP lists
       set_fact:
-        # json_query strictly checks the nested tags array for an exact name AND value match
-        # reject('none') ensures we don't accidentally add null values if connectionInfo is empty
-        web_ips: "{{ morpheus_result.json | json_query(web_query) | reject('none') | list }}"
-        db_ips: "{{ morpheus_result.json | json_query(db_query) | reject('none') | list }}"
+        web_ips: "{{ morpheus_result.json | json_query(web_q) | reject('none') | list }}"
+        db_ips:  "{{ morpheus_result.json | json_query(db_q)  | reject('none') | list }}"
       vars:
-        web_query: "instances[?tags[?name=='AppTier' && value=='Web']].connectionInfo[0].ip"
-        db_query: "instances[?tags[?name=='AppTier' && value=='DB']].connectionInfo[0].ip"
+        web_q: "instances[?tags[?name=='AppTier' && value=='Web']].connectionInfo[0].ip"
+        db_q:  "instances[?tags[?name=='AppTier' && value=='DB']].connectionInfo[0].ip"
 
-    - name: Print validated IPs for debugging
-      debug:
-        msg:
-          - "Strictly Filtered Web IPs: {{ web_ips }}"
-          - "Strictly Filtered DB IPs: {{ db_ips }}"
-
-    - name: Pass validated IP lists to vsrx host
+    - name: Pass IP lists to vsrx
       add_host:
         name: vsrx
         web_ips: "{{ web_ips }}"
-        db_ips: "{{ db_ips }}"
+        db_ips:  "{{ db_ips }}"
 
-- name: SAIL - Enforce state on SRX
+    - name: Debug desired state
+      debug:
+        msg: { "WEB": "{{ web_ips }}", "DB": "{{ db_ips }}" }
+
+
+- name: Phase 2 — Enforce desired state on SRX
   hosts: vsrx
   gather_facts: no
   collections:
@@ -59,31 +50,31 @@
 
   tasks:
 
-    - name: Sync SET_WEB addresses to SRX
-      junipernetworks.junos.junos_config:
-        lines:
-          - "set security address-book MORPHEUS_MANAGED address {{ item }} {{ item }}/32"
-          - "set security address-book MORPHEUS_MANAGED address-set SET_WEB address {{ item }}"
-        confirm: 1
-      loop: "{{ web_ips }}"
-      # Skip task if the list is empty to prevent Juniper commit errors
-      when: web_ips | length > 0
+    # junos_address_book with state: overridden handles the full diff:
+    #   - adds IPs present in Morpheus but missing from SRX
+    #   - removes IPs present on SRX but missing from Morpheus
+    #   - no-ops if already in sync
+    # It also handles the atomic commit internally.
+    - name: Reconcile MORPHEUS_MANAGED address-book
+      junipernetworks.junos.junos_address_book:
+        config:
+          - name: MORPHEUS_MANAGED
+            address_entries:
+              - name: "{{ item }}"
+                ip_prefix: "{{ item }}/32"
+            address_sets:
+              - name: SET_WEB
+                addresses: "{{ web_ips }}"
+              - name: SET_DB
+                addresses: "{{ db_ips }}"
+        state: overridden
 
-    - name: Sync SET_DB addresses to SRX
-      junipernetworks.junos.junos_config:
-        lines:
-          - "set security address-book MORPHEUS_MANAGED address {{ item }} {{ item }}/32"
-          - "set security address-book MORPHEUS_MANAGED address-set SET_DB address {{ item }}"
-        confirm: 1
-      loop: "{{ db_ips }}"
-      when: db_ips | length > 0
-
-    - name: Validate - show current SRX address book
+    - name: Validate — show final SRX address-book
       junipernetworks.junos.junos_command:
         commands:
           - show configuration security address-book MORPHEUS_MANAGED
       register: validation
 
-    - name: Print SRX state to log
+    - name: Print final SRX state
       debug:
         msg: "{{ validation.stdout_lines }}"
