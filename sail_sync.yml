@@ -42,7 +42,7 @@
         msg: { "WEB": "{{ web_ips }}", "DB": "{{ db_ips }}" }
 
 
-- name: Phase 2 — Enforce desired state on SRX
+- name: Phase 2 — Read actual state from SRX
   hosts: vsrx
   gather_facts: no
   collections:
@@ -50,29 +50,104 @@
 
   tasks:
 
-    # junos_address_book with state: overridden handles the full diff:
-    #   - adds IPs present in Morpheus but missing from SRX
-    #   - removes IPs present on SRX but missing from Morpheus
-    #   - no-ops if already in sync
-    # It also handles the atomic commit internally.
-    - name: Reconcile MORPHEUS_MANAGED address-book
-      junipernetworks.junos.junos_address_book:
-        config:
-          - name: MORPHEUS_MANAGED
-            address_entries:
-              - name: "{{ item }}"
-                ip_prefix: "{{ item }}/32"
-            address_sets:
-              - name: SET_WEB
-                addresses: "{{ web_ips }}"
-              - name: SET_DB
-                addresses: "{{ db_ips }}"
-        state: overridden
+    - name: Read current MORPHEUS_MANAGED address-book from SRX
+      junipernetworks.junos.junos_command:
+        commands:
+          - "show configuration security address-book MORPHEUS_MANAGED"
+      register: srx_raw
+
+    # Parse IPs currently in each address-set using regex on the text output.
+    # Junos text output looks like:
+    #   address-set SET_WEB {
+    #       address 10.0.1.5;
+    #   }
+    - name: Parse current SRX SET_WEB members
+      set_fact:
+        srx_web_ips: >-
+          {{
+            srx_raw.stdout[0]
+            | regex_findall('address-set SET_WEB \{([^}]*)\}', multiline=True)
+            | first | default('')
+            | regex_findall('address (\d+\.\d+\.\d+\.\d+);')
+          }}
+        srx_db_ips: >-
+          {{
+            srx_raw.stdout[0]
+            | regex_findall('address-set SET_DB \{([^}]*)\}', multiline=True)
+            | first | default('')
+            | regex_findall('address (\d+\.\d+\.\d+\.\d+);')
+          }}
+
+    - name: Compute deltas
+      set_fact:
+        web_to_add:    "{{ web_ips | difference(srx_web_ips) }}"
+        web_to_remove: "{{ srx_web_ips | difference(web_ips) }}"
+        db_to_add:     "{{ db_ips  | difference(srx_db_ips) }}"
+        db_to_remove:  "{{ srx_db_ips | difference(db_ips) }}"
+
+    - name: Debug deltas
+      debug:
+        msg:
+          - "WEB add={{ web_to_add }} remove={{ web_to_remove }}"
+          - "DB  add={{ db_to_add  }} remove={{ db_to_remove }}"
+
+
+- name: Phase 3 — Enforce desired state on SRX
+  hosts: vsrx
+  gather_facts: no
+  collections:
+    - junipernetworks.junos
+
+  tasks:
+
+    - name: Add new WEB IPs
+      junipernetworks.junos.junos_config:
+        lines:
+          - "set security address-book MORPHEUS_MANAGED address {{ item }} {{ item }}/32"
+          - "set security address-book MORPHEUS_MANAGED address-set SET_WEB address {{ item }}"
+      loop: "{{ web_to_add }}"
+      when: web_to_add | length > 0
+
+    - name: Add new DB IPs
+      junipernetworks.junos.junos_config:
+        lines:
+          - "set security address-book MORPHEUS_MANAGED address {{ item }} {{ item }}/32"
+          - "set security address-book MORPHEUS_MANAGED address-set SET_DB address {{ item }}"
+      loop: "{{ db_to_add }}"
+      when: db_to_add | length > 0
+
+    # Remove from address-set first, then delete the address object.
+    # Junos rejects a commit if the address object is deleted while still
+    # referenced by an address-set.
+    - name: Remove stale WEB IPs
+      junipernetworks.junos.junos_config:
+        lines:
+          - "delete security address-book MORPHEUS_MANAGED address-set SET_WEB address {{ item }}"
+          - "delete security address-book MORPHEUS_MANAGED address {{ item }}"
+      loop: "{{ web_to_remove }}"
+      when: web_to_remove | length > 0
+
+    - name: Remove stale DB IPs
+      junipernetworks.junos.junos_config:
+        lines:
+          - "delete security address-book MORPHEUS_MANAGED address-set SET_DB address {{ item }}"
+          - "delete security address-book MORPHEUS_MANAGED address {{ item }}"
+      loop: "{{ db_to_remove }}"
+      when: db_to_remove | length > 0
+
+    - name: No-op confirmation
+      debug:
+        msg: "Zero-impact run — SRX already matches Morpheus desired state."
+      when:
+        - web_to_add | length == 0
+        - web_to_remove | length == 0
+        - db_to_add | length == 0
+        - db_to_remove | length == 0
 
     - name: Validate — show final SRX address-book
       junipernetworks.junos.junos_command:
         commands:
-          - show configuration security address-book MORPHEUS_MANAGED
+          - "show configuration security address-book MORPHEUS_MANAGED"
       register: validation
 
     - name: Print final SRX state
