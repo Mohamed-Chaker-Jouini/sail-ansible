@@ -89,6 +89,7 @@
     - name: Pass deltas back to localhost for topology writer
       add_host:
         name: localhost
+        ansible_connection: local  # <-- FIX APPLIED HERE
         web_to_add:    "{{ web_to_add }}"
         web_to_remove: "{{ web_to_remove }}"
         db_to_add:     "{{ db_to_add }}"
@@ -157,6 +158,7 @@
 
 - name: Phase 4 — Write topology snapshot for Grafana
   hosts: localhost
+  connection: local  # <-- FIX APPLIED HERE
   gather_facts: no
 
   tasks:
