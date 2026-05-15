@@ -56,12 +56,7 @@
           - "show configuration security address-book MORPHEUS_MANAGED"
       register: srx_raw
 
-    # Parse IPs currently in each address-set using regex on the text output.
-    # Junos text output looks like:
-    #   address-set SET_WEB {
-    #       address 10.0.1.5;
-    #   }
-    - name: Parse current SRX SET_WEB members
+    - name: Parse current SRX address-set members
       set_fact:
         srx_web_ips: >-
           {{
@@ -91,6 +86,14 @@
           - "WEB add={{ web_to_add }} remove={{ web_to_remove }}"
           - "DB  add={{ db_to_add  }} remove={{ db_to_remove }}"
 
+    - name: Pass deltas back to localhost for topology writer
+      add_host:
+        name: localhost
+        web_to_add:    "{{ web_to_add }}"
+        web_to_remove: "{{ web_to_remove }}"
+        db_to_add:     "{{ db_to_add }}"
+        db_to_remove:  "{{ db_to_remove }}"
+
 
 - name: Phase 3 — Enforce desired state on SRX
   hosts: vsrx
@@ -116,9 +119,6 @@
       loop: "{{ db_to_add }}"
       when: db_to_add | length > 0
 
-    # Remove from address-set first, then delete the address object.
-    # Junos rejects a commit if the address object is deleted while still
-    # referenced by an address-set.
     - name: Remove stale WEB IPs
       junipernetworks.junos.junos_config:
         lines:
@@ -153,3 +153,94 @@
     - name: Print final SRX state
       debug:
         msg: "{{ validation.stdout_lines }}"
+
+
+- name: Phase 4 — Write topology snapshot for Grafana
+  hosts: localhost
+  gather_facts: no
+
+  tasks:
+
+    - name: Ensure topology directory exists
+      file:
+        path: /topology
+        state: directory
+        mode: '0755'
+
+    - name: Write topology.json
+      copy:
+        dest: /topology/topology.json
+        content: "{{ topology | to_nice_json }}"
+      vars:
+        srx_node:
+          - id: "srx"
+            title: "vSRX"
+            subTitle: "{{ vsrx_ip }}"
+            mainStat: "Firewall"
+            color: "orange"
+
+        zone_nodes:
+          - id: "zone_web"
+            title: "SET_WEB"
+            subTitle: "Web Tier"
+            mainStat: "{{ web_ips | length }} VMs"
+            color: "blue"
+          - id: "zone_db"
+            title: "SET_DB"
+            subTitle: "DB Tier"
+            mainStat: "{{ db_ips | length }} VMs"
+            color: "purple"
+
+        web_nodes: >-
+          {{ web_ips | map('community.general.dict_kv', 'id')
+             | map('combine', {'subTitle': 'Web VM'})
+             | list }}
+
+        # Build node list per IP with drift awareness
+        web_vm_nodes: >-
+          [
+          {% for ip in web_ips %}
+          {
+            "id": "{{ ip }}",
+            "title": "{{ ip }}",
+            "subTitle": "Web VM",
+            "mainStat": "{{ 'DRIFT FIXED' if ip in web_to_add else 'IN SYNC' }}",
+            "color": "{{ 'red' if ip in web_to_add else 'green' }}"
+          }{% if not loop.last %},{% endif %}
+          {% endfor %}
+          ]
+
+        db_vm_nodes: >-
+          [
+          {% for ip in db_ips %}
+          {
+            "id": "{{ ip }}",
+            "title": "{{ ip }}",
+            "subTitle": "DB VM",
+            "mainStat": "{{ 'DRIFT FIXED' if ip in db_to_add else 'IN SYNC' }}",
+            "color": "{{ 'red' if ip in db_to_add else 'green' }}"
+          }{% if not loop.last %},{% endif %}
+          {% endfor %}
+          ]
+
+        srx_to_zone_edges:
+          - { id: "srx-web", source: "srx",      target: "zone_web" }
+          - { id: "srx-db",  source: "srx",      target: "zone_db"  }
+
+        web_edges: >-
+          [
+          {% for ip in web_ips %}
+          { "id": "web-{{ ip }}", "source": "zone_web", "target": "{{ ip }}" }{% if not loop.last %},{% endif %}
+          {% endfor %}
+          ]
+
+        db_edges: >-
+          [
+          {% for ip in db_ips %}
+          { "id": "db-{{ ip }}", "source": "zone_db", "target": "{{ ip }}" }{% if not loop.last %},{% endif %}
+          {% endfor %}
+          ]
+
+        topology:
+          nodes: "{{ srx_node + zone_nodes + web_vm_nodes + db_vm_nodes }}"
+          edges: "{{ srx_to_zone_edges + web_edges + db_edges }}"
