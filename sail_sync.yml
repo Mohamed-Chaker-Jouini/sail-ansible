@@ -170,14 +170,22 @@
         - db_to_remove  | length == 0
 
     - name: Validate — show final SRX address-book
-      junipernetworks.junos.junos_command:
-        commands:
-          - "show configuration security address-book MORPHEUS_MANAGED | display xml"
+      ansible.netcommon.netconf_get:
+        source: running
+        filter: |
+          <configuration>
+            <security>
+              <address-book>
+                <name>MORPHEUS_MANAGED</name>
+              </address-book>
+            </security>
+          </configuration>
+        display: xml
       register: validation
 
     - name: Print final SRX state
       debug:
-        msg: "{{ validation.stdout_lines }}"
+        msg: "{{ validation.stdout }}"
 
 
 # ── Phase 4 ── Build and publish topology snapshot for Grafana ───────────────
