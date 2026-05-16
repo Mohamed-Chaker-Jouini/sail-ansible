@@ -126,33 +126,38 @@ def parse_srx_address_book(xml_text: str, set_name: str) -> List[str]:
     Parse a Junos address-book XML stanza and return the list of IPs
     that belong to the requested address-set.
 
-    The XML from `show configuration ... | display xml` looks like:
+    The XML from the NETCONF <get-config> RPC looks like:
 
-        <configuration>
-          <security>
-            <address-book>
-              <name>MORPHEUS_MANAGED</name>
-              <address>
-                <name>10.0.0.1</name>
-                <ip-prefix>10.0.0.1/32</ip-prefix>
-              </address>
-              ...
-              <address-set>
-                <name>SET_WEB</name>
-                <address>
-                  <name>10.0.0.1</name>
-                </address>
-              </address-set>
-            </address-book>
-          </security>
-        </configuration>
+        <rpc-reply>
+          <data>
+            <configuration>
+              <security>
+                <address-book>
+                  <name>MORPHEUS_MANAGED</name>
+                  <address>
+                    <name>10.0.0.1</name>
+                    <ip-prefix>10.0.0.1/32</ip-prefix>
+                  </address>
+                  ...
+                  <address-set>
+                    <name>SET_WEB</name>
+                    <address>
+                      <name>10.0.0.1</name>
+                    </address>
+                  </address-set>
+                </address-book>
+              </security>
+            </configuration>
+          </data>
+        </rpc-reply>
 
-    This function finds the <address-set> whose <name> matches `set_name`
-    and collects the <name> of every <address> child — these are the IPs
-    (Junos uses the IP string itself as the address object name).
+    We use `iter("address-set")` so the search is namespace-agnostic and
+    works regardless of where in the envelope the stanza lives.
 
     Falls back gracefully to an empty list if the XML is missing, malformed,
     or the address-set doesn't exist yet (first run against a clean SRX).
+    This means a brand-new SRX will simply result in web_to_add == web_ips
+    and db_to_add == db_ips, which is exactly the right behaviour.
     """
     if not xml_text or not xml_text.strip():
         return []

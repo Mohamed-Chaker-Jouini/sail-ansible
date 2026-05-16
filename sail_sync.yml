@@ -62,17 +62,30 @@
 
   tasks:
 
-    # Use structured XML via NETCONF rather than scraping CLI text output.
-    # filter_xml narrows the reply to just our address-book stanza so we
-    # don't have to parse the entire security config.
-    - name: Fetch MORPHEUS_MANAGED address-book config (XML)
+    # Use the NETCONF <get-config> RPC directly — returns structured XML
+    # without requiring jxmlease on the Morpheus node. We parse it ourselves
+    # in filter_plugins/topology_filters.py using stdlib ElementTree only.
+    - name: Fetch MORPHEUS_MANAGED address-book config via NETCONF RPC
       junipernetworks.junos.junos_command:
-        commands:
-          - "show configuration security address-book MORPHEUS_MANAGED | display xml"
+        rpcs:
+          - >
+            <get-config>
+              <source><running/></source>
+              <filter type="subtree">
+                <configuration>
+                  <security>
+                    <address-book>
+                      <name>MORPHEUS_MANAGED</name>
+                    </address-book>
+                  </security>
+                </configuration>
+              </filter>
+            </get-config>
       register: srx_xml_raw
 
-    # The parse_srx_address_book filter lives in
-    # filter_plugins/topology_filters.py — see that file for the xpath logic.
+    # parse_srx_address_book is in filter_plugins/topology_filters.py.
+    # srx_xml_raw.stdout[0] is the raw XML string returned by the RPC —
+    # no jxmlease, no CLI scraping.
     - name: Parse XML into current IP sets
       set_fact:
         srx_web_ips: "{{ srx_xml_raw.stdout[0] | parse_srx_address_book('SET_WEB') }}"
