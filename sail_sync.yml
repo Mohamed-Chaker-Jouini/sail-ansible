@@ -1,17 +1,32 @@
 ---
+# ─────────────────────────────────────────────────────────────────────────────
+# SAIL — SRX / Morpheus reconciliation playbook
+#
+# Variables expected from Morpheus (set in the task / workflow inputs):
+#   vsrx_ip         IP of the vSRX management interface
+#   vsrx_password   root password for the vSRX
+#   morpheus_ip     Morpheus appliance hostname or IP
+#   morpheus_token  Morpheus Bearer token
+#   fileserver_url  Base URL of the topology fileserver
+#                   e.g. http://10.202.52.109:8880
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+# ── Phase 1 ── Gather desired state from Morpheus ────────────────────────────
 - name: Phase 1 — Gather desired state from Morpheus
   hosts: localhost
   gather_facts: no
+
   tasks:
 
-    - name: Add vSRX to inventory
+    - name: Register vSRX in the in-memory inventory
       add_host:
         name: vsrx
-        ansible_host: "{{ vsrx_ip }}"
-        ansible_user: root
-        ansible_password: "{{ vsrx_password }}"
-        ansible_connection: netconf
-        ansible_network_os: junos
+        ansible_host:         "{{ vsrx_ip }}"
+        ansible_user:         root
+        ansible_password:     "{{ vsrx_password }}"
+        ansible_connection:   netconf
+        ansible_network_os:   junos
         ansible_netconf_port: 830
 
     - name: Query Morpheus for all AppTier-tagged instances
@@ -23,7 +38,7 @@
         validate_certs: no
       register: morpheus_result
 
-    - name: Build desired IP lists
+    - name: Build desired IP lists from Morpheus response
       set_fact:
         web_ips: "{{ morpheus_result.json | json_query(web_q) | reject('none') | list }}"
         db_ips:  "{{ morpheus_result.json | json_query(db_q)  | reject('none') | list }}"
@@ -31,17 +46,14 @@
         web_q: "instances[?tags[?name=='AppTier' && value=='Web']].connectionInfo[0].ip"
         db_q:  "instances[?tags[?name=='AppTier' && value=='DB']].connectionInfo[0].ip"
 
-    - name: Pass IP lists to vsrx
-      add_host:
-        name: vsrx
-        web_ips: "{{ web_ips }}"
-        db_ips:  "{{ db_ips }}"
-
     - name: Debug desired state
       debug:
-        msg: { "WEB": "{{ web_ips }}", "DB": "{{ db_ips }}" }
+        msg:
+          WEB: "{{ web_ips }}"
+          DB:  "{{ db_ips }}"
 
 
+# ── Phase 2 ── Read actual state from the SRX via NETCONF ────────────────────
 - name: Phase 2 — Read actual state from SRX
   hosts: vsrx
   gather_facts: no
@@ -50,52 +62,53 @@
 
   tasks:
 
-    - name: Read current MORPHEUS_MANAGED address-book from SRX
+    # Use structured XML via NETCONF rather than scraping CLI text output.
+    # filter_xml narrows the reply to just our address-book stanza so we
+    # don't have to parse the entire security config.
+    - name: Fetch MORPHEUS_MANAGED address-book config (XML)
       junipernetworks.junos.junos_command:
         commands:
-          - "show configuration security address-book MORPHEUS_MANAGED"
-      register: srx_raw
+          - "show configuration security address-book MORPHEUS_MANAGED | display xml"
+      register: srx_xml_raw
 
-    - name: Parse current SRX address-set members
+    # The parse_srx_address_book filter lives in
+    # filter_plugins/topology_filters.py — see that file for the xpath logic.
+    - name: Parse XML into current IP sets
       set_fact:
-        srx_web_ips: >-
-          {{
-            srx_raw.stdout[0]
-            | regex_findall('address-set SET_WEB \{([^}]*)\}', multiline=True)
-            | first | default('')
-            | regex_findall('address (\d+\.\d+\.\d+\.\d+);')
-          }}
-        srx_db_ips: >-
-          {{
-            srx_raw.stdout[0]
-            | regex_findall('address-set SET_DB \{([^}]*)\}', multiline=True)
-            | first | default('')
-            | regex_findall('address (\d+\.\d+\.\d+\.\d+);')
-          }}
+        srx_web_ips: "{{ srx_xml_raw.stdout[0] | parse_srx_address_book('SET_WEB') }}"
+        srx_db_ips:  "{{ srx_xml_raw.stdout[0] | parse_srx_address_book('SET_DB') }}"
 
     - name: Compute deltas
       set_fact:
-        web_to_add:    "{{ web_ips | difference(srx_web_ips) }}"
-        web_to_remove: "{{ srx_web_ips | difference(web_ips) }}"
-        db_to_add:     "{{ db_ips  | difference(srx_db_ips) }}"
-        db_to_remove:  "{{ srx_db_ips | difference(db_ips) }}"
+        web_to_add:    "{{ hostvars['localhost']['web_ips'] | difference(srx_web_ips) }}"
+        web_to_remove: "{{ srx_web_ips | difference(hostvars['localhost']['web_ips']) }}"
+        db_to_add:     "{{ hostvars['localhost']['db_ips']  | difference(srx_db_ips) }}"
+        db_to_remove:  "{{ srx_db_ips  | difference(hostvars['localhost']['db_ips']) }}"
 
     - name: Debug deltas
       debug:
         msg:
-          - "WEB add={{ web_to_add }} remove={{ web_to_remove }}"
-          - "DB  add={{ db_to_add  }} remove={{ db_to_remove }}"
-
-    - name: Pass deltas back to localhost for topology writer
-      add_host:
-        name: localhost
-        ansible_connection: local  # <-- FIX APPLIED HERE
-        web_to_add:    "{{ web_to_add }}"
-        web_to_remove: "{{ web_to_remove }}"
-        db_to_add:     "{{ db_to_add }}"
-        db_to_remove:  "{{ db_to_remove }}"
+          - "WEB  add={{ web_to_add }}    remove={{ web_to_remove }}"
+          - "DB   add={{ db_to_add }}     remove={{ db_to_remove }}"
 
 
+# ── Phase 2.5 ── Promote vsrx facts to localhost scope ───────────────────────
+# Explicit fact promotion replaces the fragile add_host variable-passing trick.
+- name: Phase 2.5 — Promote vsrx deltas to localhost
+  hosts: localhost
+  gather_facts: no
+
+  tasks:
+
+    - name: Pull delta facts from vsrx hostvars
+      set_fact:
+        web_to_add:    "{{ hostvars['vsrx']['web_to_add'] }}"
+        web_to_remove: "{{ hostvars['vsrx']['web_to_remove'] }}"
+        db_to_add:     "{{ hostvars['vsrx']['db_to_add'] }}"
+        db_to_remove:  "{{ hostvars['vsrx']['db_to_remove'] }}"
+
+
+# ── Phase 3 ── Enforce desired state on SRX ──────────────────────────────────
 - name: Phase 3 — Enforce desired state on SRX
   hosts: vsrx
   gather_facts: no
@@ -136,19 +149,19 @@
       loop: "{{ db_to_remove }}"
       when: db_to_remove | length > 0
 
-    - name: No-op confirmation
+    - name: No-op confirmation — SRX already matches desired state
       debug:
         msg: "Zero-impact run — SRX already matches Morpheus desired state."
       when:
-        - web_to_add | length == 0
+        - web_to_add    | length == 0
         - web_to_remove | length == 0
-        - db_to_add | length == 0
-        - db_to_remove | length == 0
+        - db_to_add     | length == 0
+        - db_to_remove  | length == 0
 
     - name: Validate — show final SRX address-book
       junipernetworks.junos.junos_command:
         commands:
-          - "show configuration security address-book MORPHEUS_MANAGED"
+          - "show configuration security address-book MORPHEUS_MANAGED | display xml"
       register: validation
 
     - name: Print final SRX state
@@ -156,93 +169,34 @@
         msg: "{{ validation.stdout_lines }}"
 
 
-- name: Phase 4 — Write topology snapshot for Grafana
+# ── Phase 4 ── Build and publish topology snapshot for Grafana ───────────────
+- name: Phase 4 — Publish topology snapshot
   hosts: localhost
-  connection: local  # <-- FIX APPLIED HERE
+  connection: local
   gather_facts: no
 
   tasks:
 
-    - name: Ensure topology directory exists
-      file:
-        path: /topology
-        state: directory
-        mode: '0755'
+    # build_topology is a custom filter in filter_plugins/topology_filters.py.
+    # It takes all four IP lists and the SRX IP and returns a clean dict with
+    # nodes[] and edges[] — no Jinja2 string interpolation required here.
+    - name: Build topology dict
+      set_fact:
+        topology: >-
+          {{ (web_ips, db_ips, web_to_add, db_to_add, vsrx_ip)
+             | build_topology }}
 
-    - name: Write topology.json
-      copy:
-        dest: /topology/topology.json
-        content: "{{ topology | to_nice_json }}"
-      vars:
-        srx_node:
-          - id: "srx"
-            title: "vSRX"
-            subTitle: "{{ vsrx_ip }}"
-            mainStat: "Firewall"
-            color: "orange"
+    - name: Push topology.json to fileserver via HTTP PUT
+      uri:
+        url:         "{{ fileserver_url }}/topology.json"
+        method:      PUT
+        body:        "{{ topology | to_nice_json }}"
+        body_format: raw
+        headers:
+          Content-Type: application/json
+        validate_certs: no
+        status_code: [200, 201, 204]
 
-        zone_nodes:
-          - id: "zone_web"
-            title: "SET_WEB"
-            subTitle: "Web Tier"
-            mainStat: "{{ web_ips | length }} VMs"
-            color: "blue"
-          - id: "zone_db"
-            title: "SET_DB"
-            subTitle: "DB Tier"
-            mainStat: "{{ db_ips | length }} VMs"
-            color: "purple"
-
-        web_nodes: >-
-          {{ web_ips | map('community.general.dict_kv', 'id')
-             | map('combine', {'subTitle': 'Web VM'})
-             | list }}
-
-        # Build node list per IP with drift awareness
-        web_vm_nodes: >-
-          [
-          {% for ip in web_ips %}
-          {
-            "id": "{{ ip }}",
-            "title": "{{ ip }}",
-            "subTitle": "Web VM",
-            "mainStat": "{{ 'DRIFT FIXED' if ip in web_to_add else 'IN SYNC' }}",
-            "color": "{{ 'red' if ip in web_to_add else 'green' }}"
-          }{% if not loop.last %},{% endif %}
-          {% endfor %}
-          ]
-
-        db_vm_nodes: >-
-          [
-          {% for ip in db_ips %}
-          {
-            "id": "{{ ip }}",
-            "title": "{{ ip }}",
-            "subTitle": "DB VM",
-            "mainStat": "{{ 'DRIFT FIXED' if ip in db_to_add else 'IN SYNC' }}",
-            "color": "{{ 'red' if ip in db_to_add else 'green' }}"
-          }{% if not loop.last %},{% endif %}
-          {% endfor %}
-          ]
-
-        srx_to_zone_edges:
-          - { id: "srx-web", source: "srx",      target: "zone_web" }
-          - { id: "srx-db",  source: "srx",      target: "zone_db"  }
-
-        web_edges: >-
-          [
-          {% for ip in web_ips %}
-          { "id": "web-{{ ip }}", "source": "zone_web", "target": "{{ ip }}" }{% if not loop.last %},{% endif %}
-          {% endfor %}
-          ]
-
-        db_edges: >-
-          [
-          {% for ip in db_ips %}
-          { "id": "db-{{ ip }}", "source": "zone_db", "target": "{{ ip }}" }{% if not loop.last %},{% endif %}
-          {% endfor %}
-          ]
-
-        topology:
-          nodes: "{{ srx_node + zone_nodes + web_vm_nodes + db_vm_nodes }}"
-          edges: "{{ srx_to_zone_edges + web_edges + db_edges }}"
+    - name: Confirm topology published
+      debug:
+        msg: "Topology pushed to {{ fileserver_url }}/topology.json"
