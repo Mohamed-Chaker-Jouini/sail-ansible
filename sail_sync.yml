@@ -58,38 +58,36 @@
   hosts: vsrx
   gather_facts: no
   collections:
+    - ansible.netcommon
     - junipernetworks.junos
 
   tasks:
 
-    # Use the NETCONF <get-config> RPC directly — returns structured XML
-    # without requiring jxmlease on the Morpheus node. We parse it ourselves
-    # in filter_plugins/topology_filters.py using stdlib ElementTree only.
-    - name: Fetch MORPHEUS_MANAGED address-book config via NETCONF RPC
-      junipernetworks.junos.junos_command:
-        rpcs:
-          - >
-            <get-config>
-              <source><running/></source>
-              <filter type="subtree">
-                <configuration>
-                  <security>
-                    <address-book>
-                      <name>MORPHEUS_MANAGED</name>
-                    </address-book>
-                  </security>
-                </configuration>
-              </filter>
-            </get-config>
+    # netconf_get issues a raw NETCONF <get-config> with a subtree filter.
+    # It requires NO extra Python libraries on the Morpheus node — just
+    # ncclient which is already installed as a dependency of the junos
+    # collection. The result is in srx_xml_raw.output[0] as a raw XML string.
+    - name: Fetch MORPHEUS_MANAGED address-book config via NETCONF get-config
+      ansible.netcommon.netconf_get:
+        source: running
+        filter: |
+          <configuration>
+            <security>
+              <address-book>
+                <name>MORPHEUS_MANAGED</name>
+              </address-book>
+            </security>
+          </configuration>
+        display: xml
       register: srx_xml_raw
 
     # parse_srx_address_book is in filter_plugins/topology_filters.py.
-    # srx_xml_raw.stdout[0] is the raw XML string returned by the RPC —
-    # no jxmlease, no CLI scraping.
+    # display=xml requires no extra libraries — it strips namespaces and
+    # returns the XML string in srx_xml_raw.output.
     - name: Parse XML into current IP sets
       set_fact:
-        srx_web_ips: "{{ srx_xml_raw.stdout[0] | parse_srx_address_book('SET_WEB') }}"
-        srx_db_ips:  "{{ srx_xml_raw.stdout[0] | parse_srx_address_book('SET_DB') }}"
+        srx_web_ips: "{{ srx_xml_raw.output | parse_srx_address_book('SET_WEB') }}"
+        srx_db_ips:  "{{ srx_xml_raw.output | parse_srx_address_book('SET_DB') }}"
 
     - name: Compute deltas
       set_fact:
