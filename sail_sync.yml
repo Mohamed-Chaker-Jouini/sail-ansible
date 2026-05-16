@@ -215,6 +215,7 @@
           Content-Type: application/json
         validate_certs: no
         status_code: [200, 201, 204]
+        use_proxy: no
 
     - name: Confirm topology published
       debug:
