@@ -56,7 +56,7 @@ def build_topology(args: tuple, srx_ip: str = "") -> dict:
 
     web_removed_nodes = [
         {
-            "id":       ip,
+            "id":       f"removed-db-{ip}",
             "title":    ip,
             "subTitle": "Web VM",
             "mainStat": "REMOVED",
@@ -125,12 +125,12 @@ def build_topology(args: tuple, srx_ip: str = "") -> dict:
     # ── Edges ─────────────────────────────────────────────────────────────────
 
     web_removed_edges = [
-        {"id": f"web-{ip}", "source": "zone_web", "target": ip}
+        {"id": f"web-removed-{ip}", "source": "zone_web", "target": f"removed-web-{ip}"}
         for ip in web_to_remove_set
     ]
 
     db_removed_edges = [
-        {"id": f"db-{ip}", "source": "zone_db", "target": ip}
+        {"id": f"db-removed-{ip}", "source": "zone_db", "target": f"db-removed-{ip}"}
         for ip in db_to_remove_set
     ]
     
