@@ -38,19 +38,46 @@
         validate_certs: no
       register: morpheus_result
 
-    - name: Build desired IP lists from Morpheus response
+    # Build a dynamic zone_map dict from whatever AppTier tag values exist.
+    # Each unique tag value (e.g. Web, DB, App) becomes a zone key (uppercased)
+    # mapped to the list of IPs carrying that tag.
+    # Result shape: { "WEB": ["10.x.x.x", ...], "DB": ["10.x.x.x", ...], ... }
+    - name: Build dynamic zone map from Morpheus response
       set_fact:
-        web_ips: "{{ morpheus_result.json | json_query(web_q) | reject('none') | list }}"
-        db_ips:  "{{ morpheus_result.json | json_query(db_q)  | reject('none') | list }}"
-      vars:
-        web_q: "instances[?tags[?name=='AppTier' && value=='Web']].connectionInfo[0].ip"
-        db_q:  "instances[?tags[?name=='AppTier' && value=='DB']].connectionInfo[0].ip"
+        zone_map: >-
+          {{ zone_map | default({}) | combine({
+               ( item.tags
+                 | selectattr('name', 'equalto', 'AppTier')
+                 | map(attribute='value')
+                 | first
+                 | upper ):
+               ( zone_map | default({}) )[
+                 item.tags
+                 | selectattr('name', 'equalto', 'AppTier')
+                 | map(attribute='value')
+                 | first
+                 | upper
+               ] | default([]) + [ item.connectionInfo[0].ip ]
+             })
+          }}
+      loop: "{{ morpheus_result.json.instances
+                | selectattr('tags', 'defined')
+                | selectattr('connectionInfo', 'defined')
+                | list }}"
+      when: >-
+        ( item.tags
+          | selectattr('name', 'equalto', 'AppTier')
+          | list | length > 0 )
+        and item.connectionInfo | length > 0
+        and item.connectionInfo[0].ip is defined
 
-    - name: Debug desired state
+    - name: Ensure zone_map is defined even when no tagged instances exist
+      set_fact:
+        zone_map: "{{ zone_map | default({}) }}"
+
+    - name: Debug desired zone map
       debug:
-        msg:
-          WEB: "{{ web_ips }}"
-          DB:  "{{ db_ips }}"
+        msg: "{{ zone_map }}"
 
 
 # ── Phase 2 ── Read actual state from the SRX via NETCONF ────────────────────
@@ -63,10 +90,6 @@
 
   tasks:
 
-    # netconf_get issues a raw NETCONF <get-config> with a subtree filter.
-    # It requires NO extra Python libraries on the Morpheus node — just
-    # ncclient which is already installed as a dependency of the junos
-    # collection. The result is in srx_xml_raw.output[0] as a raw XML string.
     - name: Fetch MORPHEUS_MANAGED address-book config via NETCONF get-config
       ansible.netcommon.netconf_get:
         source: running
@@ -81,42 +104,34 @@
         display: xml
       register: srx_xml_raw
 
-    # parse_srx_address_book is in filter_plugins/topology_filters.py.
-    # display=xml requires no extra libraries — it strips namespaces and
-    # returns the XML string in srx_xml_raw.output.
-    - name: Parse XML into current IP sets
+    # parse_srx_zone_map returns { "WEB": [...], "DB": [...], ... }
+    # stripping SET_ prefixes so zone names match Morpheus tag values.
+    - name: Parse XML into current zone map
       set_fact:
-        srx_web_ips: "{{ srx_xml_raw.output | parse_srx_address_book('SET_WEB') }}"
-        srx_db_ips:  "{{ srx_xml_raw.output | parse_srx_address_book('SET_DB') }}"
+        srx_zone_map: "{{ srx_xml_raw.output | parse_srx_zone_map }}"
 
-    - name: Compute deltas
+    # compute_deltas compares desired (Morpheus) vs current (SRX) and returns
+    # { ZONE: { to_add: [...], to_remove: [...] } } for every zone in either map.
+    - name: Compute per-zone deltas
       set_fact:
-        web_to_add:    "{{ hostvars['localhost']['web_ips'] | difference(srx_web_ips) }}"
-        web_to_remove: "{{ srx_web_ips | difference(hostvars['localhost']['web_ips']) }}"
-        db_to_add:     "{{ hostvars['localhost']['db_ips']  | difference(srx_db_ips) }}"
-        db_to_remove:  "{{ srx_db_ips  | difference(hostvars['localhost']['db_ips']) }}"
+        delta_map: "{{ hostvars['localhost']['zone_map'] | compute_deltas(srx_zone_map) }}"
 
     - name: Debug deltas
       debug:
-        msg:
-          - "WEB  add={{ web_to_add }}    remove={{ web_to_remove }}"
-          - "DB   add={{ db_to_add }}     remove={{ db_to_remove }}"
+        msg: "{{ delta_map }}"
 
 
 # ── Phase 2.5 ── Promote vsrx facts to localhost scope ───────────────────────
-# Explicit fact promotion replaces the fragile add_host variable-passing trick.
 - name: Phase 2.5 — Promote vsrx deltas to localhost
   hosts: localhost
   gather_facts: no
 
   tasks:
 
-    - name: Pull delta facts from vsrx hostvars
+    - name: Pull delta and zone facts from vsrx hostvars
       set_fact:
-        web_to_add:    "{{ hostvars['vsrx']['web_to_add'] }}"
-        web_to_remove: "{{ hostvars['vsrx']['web_to_remove'] }}"
-        db_to_add:     "{{ hostvars['vsrx']['db_to_add'] }}"
-        db_to_remove:  "{{ hostvars['vsrx']['db_to_remove'] }}"
+        delta_map:    "{{ hostvars['vsrx']['delta_map'] }}"
+        srx_zone_map: "{{ hostvars['vsrx']['srx_zone_map'] }}"
 
 
 # ── Phase 3 ── Enforce desired state on SRX ──────────────────────────────────
@@ -128,64 +143,63 @@
 
   tasks:
 
-    - name: Add new WEB IPs
+    # Add IPs to their address-set. Creates the address-set implicitly if new.
+    # item.0 is the zone name (e.g. WEB), item.1 is the IP.
+    - name: Add IPs to address-book and zone set
       junipernetworks.junos.junos_config:
         lines:
-          - "set security address-book MORPHEUS_MANAGED address {{ item }} {{ item }}/32"
-          - "set security address-book MORPHEUS_MANAGED address-set SET_WEB address {{ item }}"
-      loop: "{{ web_to_add }}"
-      when: web_to_add | length > 0
+          - "set security address-book MORPHEUS_MANAGED address {{ item.1 }} {{ item.1 }}/32"
+          - "set security address-book MORPHEUS_MANAGED address-set SET_{{ item.0 }} address {{ item.1 }}"
+      loop: "{{ delta_map | dict2items | subelements('value.to_add') }}"
+      loop_control:
+        label: "{{ item.0 }} ← {{ item.1 }}"
+      when: delta_map | dict2items | selectattr('value.to_add', 'ne', []) | list | length > 0
 
-    - name: Add new DB IPs
+    # Apply a deny-all policy in both directions for brand-new zones only.
+    # "Brand new" means the zone did not exist in the SRX address-book at all
+    # before this run — i.e. it is absent from srx_zone_map.
+    # This ensures a misconfigured tag never exposes a VM until a human
+    # explicitly adds a permit policy.
+    - name: Apply deny-all policy for brand-new zones
       junipernetworks.junos.junos_config:
         lines:
-          - "set security address-book MORPHEUS_MANAGED address {{ item }} {{ item }}/32"
-          - "set security address-book MORPHEUS_MANAGED address-set SET_DB address {{ item }}"
-      loop: "{{ db_to_add }}"
-      when: db_to_add | length > 0
+          # Outbound deny
+          - "set security policies from-zone {{ item.0 }}_ZONE to-zone untrust policy DENY_ALL_OUT_{{ item.0 }} match source-address SET_{{ item.0 }}"
+          - "set security policies from-zone {{ item.0 }}_ZONE to-zone untrust policy DENY_ALL_OUT_{{ item.0 }} match destination-address any"
+          - "set security policies from-zone {{ item.0 }}_ZONE to-zone untrust policy DENY_ALL_OUT_{{ item.0 }} match application any"
+          - "set security policies from-zone {{ item.0 }}_ZONE to-zone untrust policy DENY_ALL_OUT_{{ item.0 }} then deny"
+          # Inbound deny
+          - "set security policies from-zone untrust to-zone {{ item.0 }}_ZONE policy DENY_ALL_IN_{{ item.0 }} match source-address any"
+          - "set security policies from-zone untrust to-zone {{ item.0 }}_ZONE policy DENY_ALL_IN_{{ item.0 }} match destination-address SET_{{ item.0 }}"
+          - "set security policies from-zone untrust to-zone {{ item.0 }}_ZONE policy DENY_ALL_IN_{{ item.0 }} match application any"
+          - "set security policies from-zone untrust to-zone {{ item.0 }}_ZONE policy DENY_ALL_IN_{{ item.0 }} then deny"
+      loop: "{{ delta_map | dict2items
+                | selectattr('value.to_add', 'ne', [])
+                | list }}"
+      loop_control:
+        label: "{{ item.0 }}"
+      # Only fire when this zone was completely absent from the SRX before this run.
+      when: item.0 not in srx_zone_map
 
-    - name: Remove stale WEB IPs
+    # Remove stale IPs from their address-set then delete the address entry.
+    - name: Remove stale IPs from address-book and zone set
       junipernetworks.junos.junos_config:
         lines:
-          - "delete security address-book MORPHEUS_MANAGED address-set SET_WEB address {{ item }}"
-          - "delete security address-book MORPHEUS_MANAGED address {{ item }}"
-      loop: "{{ web_to_remove }}"
-      when: web_to_remove | length > 0
-
-    - name: Remove stale DB IPs
-      junipernetworks.junos.junos_config:
-        lines:
-          - "delete security address-book MORPHEUS_MANAGED address-set SET_DB address {{ item }}"
-          - "delete security address-book MORPHEUS_MANAGED address {{ item }}"
-      loop: "{{ db_to_remove }}"
-      when: db_to_remove | length > 0
+          - "delete security address-book MORPHEUS_MANAGED address-set SET_{{ item.0 }} address {{ item.1 }}"
+          - "delete security address-book MORPHEUS_MANAGED address {{ item.1 }}"
+      loop: "{{ delta_map | dict2items | subelements('value.to_remove') }}"
+      loop_control:
+        label: "{{ item.0 }} → {{ item.1 }}"
+      when: delta_map | dict2items | selectattr('value.to_remove', 'ne', []) | list | length > 0
 
     - name: No-op confirmation — SRX already matches desired state
       debug:
         msg: "Zero-impact run — SRX already matches Morpheus desired state."
-      when:
-        - web_to_add    | length == 0
-        - web_to_remove | length == 0
-        - db_to_add     | length == 0
-        - db_to_remove  | length == 0
-
-    - name: Validate — show final SRX address-book
-      ansible.netcommon.netconf_get:
-        source: running
-        filter: |
-          <configuration>
-            <security>
-              <address-book>
-                <name>MORPHEUS_MANAGED</name>
-              </address-book>
-            </security>
-          </configuration>
-        display: xml
-      register: validation
-
-    - name: Print final SRX state
-      debug:
-        msg: "{{ validation.stdout }}"
+      when: >-
+        delta_map.values()
+        | map(attribute='to_add')    | flatten | length == 0
+        and delta_map.values()
+        | map(attribute='to_remove') | flatten | length == 0
 
 
 # ── Phase 4 ── Build and publish topology snapshot for Grafana ───────────────
@@ -196,14 +210,12 @@
 
   tasks:
 
-    # build_topology is a custom filter in filter_plugins/topology_filters.py.
-    # It takes all four IP lists and the SRX IP and returns a clean dict with
-    # nodes[] and edges[] — no Jinja2 string interpolation required here.
+    # build_topology accepts (zone_map, delta_map, vsrx_ip) and returns
+    # { nodes: [...], edges: [...] } ready for the Grafana node-graph panel.
     - name: Build topology dict
       set_fact:
         topology: >-
-          {{ (web_ips, db_ips, web_to_add, db_to_add, web_to_remove, db_to_remove, vsrx_ip)
-             | build_topology }}
+          {{ (zone_map, delta_map, vsrx_ip) | build_topology }}
 
     - name: Push topology.json to fileserver via HTTP PUT
       uri:
@@ -214,8 +226,8 @@
         headers:
           Content-Type: application/json
         validate_certs: no
-        status_code: [200, 201, 204]
-        use_proxy: no
+        status_code:   [200, 201, 204]
+        use_proxy:     no
 
     - name: Confirm topology published
       debug:

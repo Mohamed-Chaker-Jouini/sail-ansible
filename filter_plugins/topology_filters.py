@@ -5,157 +5,41 @@ Custom Ansible filters for the SAIL playbook.
 
 Filters
 -------
-build_topology(args, srx_ip)
-    Build the Grafana node-graph topology dict from IP lists and delta sets.
+build_topology(args)
+    Build the Grafana node-graph topology dict from a dynamic zone map and deltas.
 
 parse_srx_address_book(xml_text, set_name)
-    Extract IP addresses from a Junos address-book XML stanza.
+    Extract IP addresses from a Junos address-book XML stanza (single set lookup).
+
+parse_srx_zone_map(xml_text)
+    Parse the full MORPHEUS_MANAGED address-book into a zone → [ips] dict.
+
+compute_deltas(desired, current)
+    Compare desired zone_map from Morpheus against current srx_zone_map and
+    return per-zone add/remove lists.
 
 Usage in playbook
 -----------------
-  topology: "{{ (web_ips, db_ips, web_to_add, db_to_add, vsrx_ip) | build_topology }}"
-  srx_web_ips: "{{ srx_xml_raw.stdout[0] | parse_srx_address_book('SET_WEB') }}"
+  topology:     "{{ (zone_map, delta_map, vsrx_ip) | build_topology }}"
+  srx_zone_map: "{{ srx_xml_raw.output | parse_srx_zone_map }}"
+  delta_map:    "{{ zone_map | compute_deltas(srx_zone_map) }}"
 """
 
 from __future__ import annotations
 
 import re
 import xml.etree.ElementTree as ET
-from typing import List
+from typing import Dict, List
 
 
-# ── build_topology ────────────────────────────────────────────────────────────
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
-def build_topology(args: tuple, srx_ip: str = "") -> dict:
-    """
-    Called via the Jinja2 pipe syntax:
-        (web_ips, db_ips, web_to_add, db_to_add, vsrx_ip) | build_topology
+# Cycle of zone-tier node colours (srx orange is reserved).
+_ZONE_COLORS = ["blue", "purple", "green", "yellow", "semi-dark-red"]
 
-    Ansible passes the left-hand value as the first positional argument and
-    the filter name resolves to this function, so `args` is the tuple and
-    `srx_ip` is unused (vsrx_ip is already inside args[4]).
 
-    Parameters inside args
-    ----------------------
-    args[0]  list[str]  web_ips        — desired Web VM IPs from Morpheus
-    args[1]  list[str]  db_ips         — desired DB VM IPs from Morpheus
-    args[2]  list[str]  web_to_add     — IPs being added this run
-    args[3]  list[str]  db_to_add      — IPs being added this run
-    args[4]  list[str]  web_to_remove  — IPs being removed this run
-    args[5]  list[str]  db_to_remove   — IPs being removed this run
-    args[6]  str        vsrx_ip        — management IP of the vSRX
-    """
-    web_ips, db_ips, web_to_add, db_to_add, web_to_remove, db_to_remove, vsrx_ip = args
-
-    web_to_add_set = set(web_to_add)
-    db_to_add_set  = set(db_to_add)
-    web_to_remove_set = set(web_to_remove)
-    db_to_remove_set = set(web_to_remove)
-
-    # ── Nodes ─────────────────────────────────────────────────────────────────
-
-    web_removed_nodes = [
-        {
-            "id":       f"removed-db-{ip}",
-            "title":    ip,
-            "subTitle": "Web VM",
-            "mainStat": "REMOVED",
-            "color":    "red",
-        }
-        for ip in web_to_remove_set
-    ]
-
-    db_removed_nodes = [
-        {
-            "id":       ip,
-            "title":    ip,
-            "subTitle": "DB VM",
-            "mainStat": "REMOVED",
-            "color":    "red",
-        }
-        for ip in db_to_remove_set
-    ]
-
-    srx_node = {
-        "id":       "srx",
-        "title":    "vSRX",
-        "subTitle": vsrx_ip,
-        "mainStat": "Firewall",
-        "color":    "orange",
-    }
-
-    zone_web_node = {
-        "id":       "zone_web",
-        "title":    "SET_WEB",
-        "subTitle": "Web Tier",
-        "mainStat": f"{len(web_ips)} VMs",
-        "color":    "blue",
-    }
-
-    zone_db_node = {
-        "id":       "zone_db",
-        "title":    "SET_DB",
-        "subTitle": "DB Tier",
-        "mainStat": f"{len(db_ips)} VMs",
-        "color":    "purple",
-    }
-
-    web_vm_nodes = [
-        {
-            "id":       ip,
-            "title":    ip,
-            "subTitle": "Web VM",
-            "mainStat": "DRIFT FIXED" if ip in web_to_add_set else "IN SYNC",
-            "color":    "red"          if ip in web_to_add_set else "green",
-        }
-        for ip in web_ips
-    ]
-
-    db_vm_nodes = [
-        {
-            "id":       ip,
-            "title":    ip,
-            "subTitle": "DB VM",
-            "mainStat": "DRIFT FIXED" if ip in db_to_add_set else "IN SYNC",
-            "color":    "red"          if ip in db_to_add_set else "green",
-        }
-        for ip in db_ips
-    ]
-
-    # ── Edges ─────────────────────────────────────────────────────────────────
-
-    web_removed_edges = [
-        {"id": f"web-removed-{ip}", "source": "zone_web", "target": f"removed-web-{ip}"}
-        for ip in web_to_remove_set
-    ]
-
-    db_removed_edges = [
-        {"id": f"db-removed-{ip}", "source": "zone_db", "target": f"db-removed-{ip}"}
-        for ip in db_to_remove_set
-    ]
-    
-    srx_to_zone_edges = [
-        {"id": "srx-web", "source": "srx", "target": "zone_web"},
-        {"id": "srx-db",  "source": "srx", "target": "zone_db"},
-    ]
-
-    web_edges = [
-        {"id": f"web-{ip}", "source": "zone_web", "target": ip}
-        for ip in web_ips
-    ]
-
-    db_edges = [
-        {"id": f"db-{ip}", "source": "zone_db", "target": ip}
-        for ip in db_ips
-    ]
-
-    return {
-        "nodes": [srx_node, zone_web_node, zone_db_node] 
-        + web_vm_nodes + db_vm_nodes
-        + web_removed_nodes + db_removed_nodes,
-        "edges": srx_to_zone_edges + web_edges + db_edges
-        + web_removed_edges + db_removed_edges,
-    }
+def _zone_color(index: int) -> str:
+    return _ZONE_COLORS[index % len(_ZONE_COLORS)]
 
 
 # ── parse_srx_address_book ────────────────────────────────────────────────────
@@ -177,7 +61,6 @@ def parse_srx_address_book(xml_text: str, set_name: str) -> List[str]:
                     <name>10.0.0.1</name>
                     <ip-prefix>10.0.0.1/32</ip-prefix>
                   </address>
-                  ...
                   <address-set>
                     <name>SET_WEB</name>
                     <address>
@@ -190,39 +73,206 @@ def parse_srx_address_book(xml_text: str, set_name: str) -> List[str]:
           </data>
         </rpc-reply>
 
-    We use `iter("address-set")` so the search is namespace-agnostic and
-    works regardless of where in the envelope the stanza lives.
-
     Falls back gracefully to an empty list if the XML is missing, malformed,
-    or the address-set doesn't exist yet (first run against a clean SRX).
-    This means a brand-new SRX will simply result in web_to_add == web_ips
-    and db_to_add == db_ips, which is exactly the right behaviour.
+    or the address-set does not exist yet (first run against a clean SRX).
     """
     if not xml_text or not xml_text.strip():
         return []
 
     try:
-        # Junos may emit an XML declaration and namespace prefixes;
-        # strip the declaration so ElementTree doesn't choke on encoding attrs.
         clean = re.sub(r"<\?xml[^>]+\?>", "", xml_text).strip()
         root  = ET.fromstring(clean)
 
-        # Walk every <address-set> regardless of namespace.
         for addr_set in root.iter("address-set"):
             name_el = addr_set.find("name")
             if name_el is None or name_el.text != set_name:
                 continue
-            # Collect the <name> of each <address> child (the IP string).
             return [
                 addr.findtext("name", default="")
                 for addr in addr_set.findall("address")
                 if addr.findtext("name", default="")
             ]
     except ET.ParseError:
-        # Non-fatal — return empty so the delta logic adds everything fresh.
         pass
 
     return []
+
+
+# ── parse_srx_zone_map ────────────────────────────────────────────────────────
+
+def parse_srx_zone_map(xml_text: str) -> Dict[str, List[str]]:
+    """
+    Parse the full MORPHEUS_MANAGED address-book XML and return a dict of:
+        { "WEB": ["ip1", "ip2"], "DB": ["ip3"], ... }
+
+    The SET_ prefix is stripped from each address-set name so zone names
+    match the AppTier tag values coming from Morpheus (uppercased).
+
+    Falls back gracefully to an empty dict on missing/malformed XML so that
+    a brand-new SRX simply results in all desired IPs landing in to_add.
+    """
+    if not xml_text or not xml_text.strip():
+        return {}
+
+    try:
+        clean = re.sub(r"<\?xml[^>]+\?>", "", xml_text).strip()
+        root  = ET.fromstring(clean)
+        result: Dict[str, List[str]] = {}
+
+        for addr_set in root.iter("address-set"):
+            name_el = addr_set.find("name")
+            if name_el is None:
+                continue
+            raw_name = name_el.text or ""
+            # Normalise: strip the SET_ prefix Ansible added, uppercase the rest.
+            zone = raw_name.replace("SET_", "", 1).upper()
+            ips  = [
+                addr.findtext("name", default="")
+                for addr in addr_set.findall("address")
+                if addr.findtext("name", default="")
+            ]
+            result[zone] = ips
+
+        return result
+
+    except ET.ParseError:
+        return {}
+
+
+# ── compute_deltas ────────────────────────────────────────────────────────────
+
+def compute_deltas(desired: Dict[str, List[str]],
+                   current: Dict[str, List[str]]) -> Dict[str, Dict[str, List[str]]]:
+    """
+    Compare the desired zone_map (from Morpheus) against the current
+    srx_zone_map (parsed from NETCONF) and return per-zone delta dicts.
+
+    Called via Jinja2 pipe:
+        zone_map | compute_deltas(srx_zone_map)
+
+    Returns:
+        {
+          "WEB": { "to_add": [...], "to_remove": [...] },
+          "DB":  { "to_add": [...], "to_remove": [...] },
+          "APP": { "to_add": [...], "to_remove": [] },   # brand-new zone
+        }
+
+    Zones present in current but absent from desired will have an empty
+    to_add and a full to_remove, allowing clean-up of orphaned sets.
+    """
+    all_zones = set(desired.keys()) | set(current.keys())
+    deltas: Dict[str, Dict[str, List[str]]] = {}
+
+    for zone in sorted(all_zones):
+        want = set(desired.get(zone, []))
+        have = set(current.get(zone, []))
+        deltas[zone] = {
+            "to_add":    sorted(want - have),
+            "to_remove": sorted(have - want),
+        }
+
+    return deltas
+
+
+# ── build_topology ────────────────────────────────────────────────────────────
+
+def build_topology(args: tuple, _unused: str = "") -> dict:
+    """
+    Build the Grafana node-graph topology dict from a dynamic zone map.
+
+    Called via the Jinja2 pipe syntax:
+        (zone_map, delta_map, vsrx_ip) | build_topology
+
+    Parameters inside args
+    ----------------------
+    args[0]  dict[str, list[str]]  zone_map   — { ZONE: [ips] } from Morpheus
+    args[1]  dict[str, dict]       delta_map  — { ZONE: {to_add, to_remove} }
+    args[2]  str                   vsrx_ip    — management IP of the vSRX
+
+    Node IDs
+    --------
+    - SRX firewall  : "srx"
+    - Zone tier     : "zone_{zone_lower}"          e.g. "zone_web"
+    - Active VM     : "{ip}"                       e.g. "10.0.0.1"
+    - Removed VM    : "removed-{zone_lower}-{ip}"  e.g. "removed-web-10.0.0.1"
+
+    Edge IDs follow the same conventions so source→target pairs are always
+    unambiguous even when the same IP appears in multiple zones.
+    """
+    zone_map, delta_map, vsrx_ip = args
+
+    nodes: list = []
+    edges: list = []
+
+    # ── vSRX anchor node ──────────────────────────────────────────────────────
+    nodes.append({
+        "id":       "srx",
+        "title":    "vSRX",
+        "subTitle": vsrx_ip,
+        "mainStat": "Firewall",
+        "color":    "orange",
+    })
+
+    # ── Per-zone nodes and edges ───────────────────────────────────────────────
+    for idx, (zone, ips) in enumerate(sorted(zone_map.items())):
+        zone_lower = zone.lower()
+        zone_id    = f"zone_{zone_lower}"
+        color      = _zone_color(idx)
+
+        to_add    = set(delta_map.get(zone, {}).get("to_add",    []))
+        to_remove = set(delta_map.get(zone, {}).get("to_remove", []))
+
+        # Zone tier node
+        nodes.append({
+            "id":       zone_id,
+            "title":    f"SET_{zone}",
+            "subTitle": f"{zone} Tier",
+            "mainStat": f"{len(ips)} VMs",
+            "color":    color,
+        })
+
+        # SRX → zone edge
+        edges.append({
+            "id":     f"srx-{zone_lower}",
+            "source": "srx",
+            "target": zone_id,
+        })
+
+        # Active VM nodes and edges
+        for ip in ips:
+            drift = ip in to_add
+            nodes.append({
+                "id":       ip,
+                "title":    ip,
+                "subTitle": f"{zone} VM",
+                "mainStat": "DRIFT FIXED" if drift else "IN SYNC",
+                "color":    "red"          if drift else "green",
+            })
+            edges.append({
+                "id":     f"{zone_lower}-{ip}",
+                "source": zone_id,
+                "target": ip,
+            })
+
+        # Removed VM ghost nodes and edges
+        # Node ID is prefixed with "removed-{zone_lower}-" to guarantee
+        # uniqueness even when the same IP was in multiple zones.
+        for ip in to_remove:
+            removed_id = f"removed-{zone_lower}-{ip}"
+            nodes.append({
+                "id":       removed_id,
+                "title":    ip,
+                "subTitle": f"{zone} VM",
+                "mainStat": "REMOVED",
+                "color":    "red",
+            })
+            edges.append({
+                "id":     f"{zone_lower}-removed-{ip}",
+                "source": zone_id,
+                "target": removed_id,
+            })
+
+    return {"nodes": nodes, "edges": edges}
 
 
 # ── FilterModule ──────────────────────────────────────────────────────────────
@@ -232,6 +282,8 @@ class FilterModule:
 
     def filters(self):
         return {
-            "build_topology":          build_topology,
-            "parse_srx_address_book":  parse_srx_address_book,
+            "build_topology":         build_topology,
+            "parse_srx_address_book": parse_srx_address_book,  # kept for single-set lookups
+            "parse_srx_zone_map":     parse_srx_zone_map,
+            "compute_deltas":         compute_deltas,
         }
