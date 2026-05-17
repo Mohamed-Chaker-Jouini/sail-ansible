@@ -37,18 +37,44 @@ def build_topology(args: tuple, srx_ip: str = "") -> dict:
 
     Parameters inside args
     ----------------------
-    args[0]  list[str]  web_ips      — desired Web VM IPs from Morpheus
-    args[1]  list[str]  db_ips       — desired DB VM IPs from Morpheus
-    args[2]  list[str]  web_to_add   — IPs being added this run (drift fixed)
-    args[3]  list[str]  db_to_add    — IPs being added this run (drift fixed)
-    args[4]  str        vsrx_ip      — management IP of the vSRX
+    args[0]  list[str]  web_ips        — desired Web VM IPs from Morpheus
+    args[1]  list[str]  db_ips         — desired DB VM IPs from Morpheus
+    args[2]  list[str]  web_to_add     — IPs being added this run
+    args[3]  list[str]  db_to_add      — IPs being added this run
+    args[4]  list[str]  web_to_remove  — IPs being removed this run
+    args[5]  list[str]  db_to_remove   — IPs being removed this run
+    args[6]  str        vsrx_ip        — management IP of the vSRX
     """
-    web_ips, db_ips, web_to_add, db_to_add, vsrx_ip = args
+    web_ips, db_ips, web_to_add, db_to_add, web_to_remove, db_to_remove, vsrx_ip = args
 
     web_to_add_set = set(web_to_add)
     db_to_add_set  = set(db_to_add)
+    web_to_remove_set = set(web_to_remove)
+    db_to_remove_set = set(web_to_remove)
 
     # ── Nodes ─────────────────────────────────────────────────────────────────
+
+    web_removed_nodes = [
+        {
+            "id":       ip,
+            "title":    ip,
+            "subTitle": "Web VM",
+            "mainStat": "REMOVED",
+            "color":    "red",
+        }
+        for ip in web_to_remove_set
+    ]
+
+    db_removed_nodes = [
+        {
+            "id":       ip,
+            "title":    ip,
+            "subTitle": "DB VM",
+            "mainStat": "REMOVED",
+            "color":    "red",
+        }
+        for ip in db_to_remove_set
+    ]
 
     srx_node = {
         "id":       "srx",
@@ -98,6 +124,16 @@ def build_topology(args: tuple, srx_ip: str = "") -> dict:
 
     # ── Edges ─────────────────────────────────────────────────────────────────
 
+    web_removed_edges = [
+        {"id": f"web-{ip}", "source": "zone_web", "target": ip}
+        for ip in web_to_remove_set
+    ]
+
+    db_removed_edges = [
+        {"id": f"db-{ip}", "source": "zone_db", "target": ip}
+        for ip in db_to_remove_set
+    ]
+    
     srx_to_zone_edges = [
         {"id": "srx-web", "source": "srx", "target": "zone_web"},
         {"id": "srx-db",  "source": "srx", "target": "zone_db"},
@@ -114,8 +150,11 @@ def build_topology(args: tuple, srx_ip: str = "") -> dict:
     ]
 
     return {
-        "nodes": [srx_node, zone_web_node, zone_db_node] + web_vm_nodes + db_vm_nodes,
-        "edges": srx_to_zone_edges + web_edges + db_edges,
+        "nodes": [srx_node, zone_web_node, zone_db_node] 
+        + web_vm_nodes + db_vm_nodes
+        + web_removed_nodes + db_removed_nodes,
+        "edges": srx_to_zone_edges + web_edges + db_edges
+        + web_removed_edges + db_removed_edges,
     }
 
 

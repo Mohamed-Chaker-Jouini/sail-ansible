@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -123,20 +124,20 @@ class CallbackModule(CallbackBase):
     # ── Internal helpers ──────────────────────────────────────────────────────
 
     def _push(self, labels: dict, message: str) -> None:
-        """Send one log line to Loki. Silently swallows all errors — a dead
-        Loki instance must never break an Ansible run."""
+        t = threading.Thread(target=self._push_sync, args=(labels, message), daemon=True)
+        t.start()
+
+    def _push_sync(self, labels: dict, message: str) -> None:
         if not self._loki_url:
             return
 
         base_labels = {"job": "ansible", "project": "SAIL"}
-        # Drop empty-string label values to keep Grafana streams clean.
         base_labels.update({k: v for k, v in labels.items() if v})
 
         payload = {
             "streams": [
                 {
                     "stream": base_labels,
-                    # time_ns() prevents Loki out-of-order rejections.
                     "values": [[str(time.time_ns()), message]],
                 }
             ]
@@ -153,9 +154,8 @@ class CallbackModule(CallbackBase):
             with urllib.request.urlopen(req, timeout=self._timeout):
                 pass
         except Exception as exc:
-            # Visible at -vvv; never raises.
             self._display.vvv(f"loki_push: failed → {self._loki_url}: {exc}")
-
+    
     def _task_labels(self, task, host=None, status: str = "unknown") -> dict:
         role_name = task._role.get_name() if getattr(task, "_role", None) else None
         labels = {

@@ -202,7 +202,7 @@
     - name: Build topology dict
       set_fact:
         topology: >-
-          {{ (web_ips, db_ips, web_to_add, db_to_add, vsrx_ip)
+          {{ (web_ips, db_ips, web_to_add, db_to_add, web_to_remove, db_to_remove, vsrx_ip)
              | build_topology }}
 
     - name: Push topology.json to fileserver via HTTP PUT
