@@ -232,3 +232,34 @@
     - name: Confirm topology published
       debug:
         msg: "Topology pushed to {{ fileserver_url }}/topology.json"
+    - name: Construct and send audit history log via HTTP POST
+      vars:
+        # Check if any zone had IPs added or removed during this execution
+        any_adds: "{{ delta_map.values() | map(attribute='to_add') | flatten | length > 0 }}"
+        any_rems: "{{ delta_map.values() | map(attribute='to_remove') | flatten | length > 0 }}"
+        # Find completely brand-new zones (present in desired/morpheus but missing on the SRX)
+        discovered_new_zones: >-
+          {% set nz = [] %}
+          {% for zone in delta_map.keys() %}
+            {% if zone not in srx_zone_map %}
+              {% set _ = nz.append(zone) %}
+            {% endif %}
+          {% endfor %}
+          {{ nz }}
+      uri:
+        url: "{{ fileserver_url }}/history"
+        method: POST
+        body_format: json
+        body:
+          ts: "{{ lookup('pipe', 'date +%s') | int }}"
+          run_id: "{{ ansible_run_tags | default('job-' + lookup('password', '/dev/null chars=digits length=6')) }}"
+          vsrx_ip: "{{ vsrx_ip }}"
+          changed: "{{ any_adds or any_rems or (discovered_new_zones | length > 0) }}"
+          delta_map: "{{ delta_map }}"
+          new_zones: "{{ discovered_new_zones }}"
+          duration_s: 2.5 # Placeholder or trackable via ansible_facts if required
+        headers:
+          Content-Type: application/json
+        validate_certs: no
+        status_code: [200]
+        use_proxy: no
