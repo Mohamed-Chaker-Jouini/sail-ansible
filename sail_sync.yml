@@ -149,10 +149,10 @@
       junipernetworks.junos.junos_config:
         lines:
           - "set security address-book MORPHEUS_MANAGED address {{ item.1 }} {{ item.1 }}/32"
-          - "set security address-book MORPHEUS_MANAGED address-set SET_{{ item.0 }} address {{ item.1 }}"
+          - "set security address-book MORPHEUS_MANAGED address-set SET_{{ item.0.key }} address {{ item.1 }}"
       loop: "{{ delta_map | dict2items | subelements('value.to_add') }}"
       loop_control:
-        label: "{{ item.0 }} ← {{ item.1 }}"
+        label: "{{ item.0.key }} ← {{ item.1 }}"
       when: delta_map | dict2items | selectattr('value.to_add', 'ne', []) | list | length > 0
 
     # Apply a deny-all policy in both directions for brand-new zones only.
@@ -164,32 +164,32 @@
       junipernetworks.junos.junos_config:
         lines:
           # Outbound deny
-          - "set security policies from-zone {{ item.0 }}_ZONE to-zone untrust policy DENY_ALL_OUT_{{ item.0 }} match source-address SET_{{ item.0 }}"
-          - "set security policies from-zone {{ item.0 }}_ZONE to-zone untrust policy DENY_ALL_OUT_{{ item.0 }} match destination-address any"
-          - "set security policies from-zone {{ item.0 }}_ZONE to-zone untrust policy DENY_ALL_OUT_{{ item.0 }} match application any"
-          - "set security policies from-zone {{ item.0 }}_ZONE to-zone untrust policy DENY_ALL_OUT_{{ item.0 }} then deny"
+          - "set security policies from-zone {{ item.key }}_ZONE to-zone untrust policy DENY_ALL_OUT_{{ item.key }} match source-address SET_{{ item.key }}"
+          - "set security policies from-zone {{ item.key }}_ZONE to-zone untrust policy DENY_ALL_OUT_{{ item.key }} match destination-address any"
+          - "set security policies from-zone {{ item.key }}_ZONE to-zone untrust policy DENY_ALL_OUT_{{ item.key }} match application any"
+          - "set security policies from-zone {{ item.key }}_ZONE to-zone untrust policy DENY_ALL_OUT_{{ item.key }} then deny"
           # Inbound deny
-          - "set security policies from-zone untrust to-zone {{ item.0 }}_ZONE policy DENY_ALL_IN_{{ item.0 }} match source-address any"
-          - "set security policies from-zone untrust to-zone {{ item.0 }}_ZONE policy DENY_ALL_IN_{{ item.0 }} match destination-address SET_{{ item.0 }}"
-          - "set security policies from-zone untrust to-zone {{ item.0 }}_ZONE policy DENY_ALL_IN_{{ item.0 }} match application any"
-          - "set security policies from-zone untrust to-zone {{ item.0 }}_ZONE policy DENY_ALL_IN_{{ item.0 }} then deny"
+          - "set security policies from-zone untrust to-zone {{ item.key }}_ZONE policy DENY_ALL_IN_{{ item.key }} match source-address any"
+          - "set security policies from-zone untrust to-zone {{ item.key }}_ZONE policy DENY_ALL_IN_{{ item.key }} match destination-address SET_{{ item.key }}"
+          - "set security policies from-zone untrust to-zone {{ item.key }}_ZONE policy DENY_ALL_IN_{{ item.key }} match application any"
+          - "set security policies from-zone untrust to-zone {{ item.key }}_ZONE policy DENY_ALL_IN_{{ item.key }} then deny"
       loop: "{{ delta_map | dict2items
                 | selectattr('value.to_add', 'ne', [])
                 | list }}"
       loop_control:
-        label: "{{ item.0 }}"
+        label: "{{ item.key }}"
       # Only fire when this zone was completely absent from the SRX before this run.
-      when: item.0 not in srx_zone_map
+      when: item.key not in srx_zone_map
 
     # Remove stale IPs from their address-set then delete the address entry.
     - name: Remove stale IPs from address-book and zone set
       junipernetworks.junos.junos_config:
         lines:
-          - "delete security address-book MORPHEUS_MANAGED address-set SET_{{ item.0 }} address {{ item.1 }}"
+          - "delete security address-book MORPHEUS_MANAGED address-set SET_{{ item.0.key }} address {{ item.1 }}"
           - "delete security address-book MORPHEUS_MANAGED address {{ item.1 }}"
       loop: "{{ delta_map | dict2items | subelements('value.to_remove') }}"
       loop_control:
-        label: "{{ item.0 }} → {{ item.1 }}"
+        label: "{{ item.0.key }} → {{ item.1 }}"
       when: delta_map | dict2items | selectattr('value.to_remove', 'ne', []) | list | length > 0
 
     - name: No-op confirmation — SRX already matches desired state
