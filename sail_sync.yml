@@ -157,10 +157,6 @@
       when: delta_map | dict2items | selectattr('value.to_add', 'ne', []) | list | length > 0
 
     # Apply a deny-all policy in both directions for brand-new zones only.
-    # "Brand new" means the zone did not exist in the SRX address-book at all
-    # before this run — i.e. it is absent from srx_zone_map.
-    # This ensures a misconfigured tag never exposes a VM until a human
-    # explicitly adds a permit policy.
     - name: Apply deny-all policy for brand-new zones
       junipernetworks.junos.junos_config:
         lines:
@@ -174,24 +170,34 @@
           - "set security policies from-zone untrust to-zone {{ item.key }}_ZONE policy DENY_ALL_IN_{{ item.key }} match destination-address SET_{{ item.key }}"
           - "set security policies from-zone untrust to-zone {{ item.key }}_ZONE policy DENY_ALL_IN_{{ item.key }} match application any"
           - "set security policies from-zone untrust to-zone {{ item.key }}_ZONE policy DENY_ALL_IN_{{ item.key }} then deny"
-      loop: "{{ delta_map | dict2items
-                | selectattr('value.to_add', 'ne', [])
-                | list }}"
+      loop: "{{ delta_map | dict2items | selectattr('value.to_add', 'ne', []) | list }}"
       loop_control:
         label: "{{ item.key }}"
-      # Only fire when this zone was completely absent from the SRX before this run.
       when: item.key not in srx_zone_map
 
-    # Remove stale IPs from their address-set then delete the address entry.
-    - name: Remove stale IPs from address-book and zone set
+    # ONLY remove the IP from the specific address-set (Zone) it is leaving.
+    # This prevents the constraint error if the IP is still needed by a new zone.
+    - name: Remove stale IPs from zone set
       junipernetworks.junos.junos_config:
         lines:
           - "delete security address-book MORPHEUS_MANAGED address-set SET_{{ item.0.key }} address {{ item.1 }}"
-          - "delete security address-book MORPHEUS_MANAGED address {{ item.1 }}"
       loop: "{{ delta_map | dict2items | subelements('value.to_remove') }}"
       loop_control:
         label: "{{ item.0.key }} → {{ item.1 }}"
       when: delta_map | dict2items | selectattr('value.to_remove', 'ne', []) | list | length > 0
+
+    # Clean up the base address object ONLY if it is no longer used by ANY zone.
+    # We check if the IP exists in the master localhost 'zone_map'.
+    - name: Garbage collect orphaned IP address objects
+      junipernetworks.junos.junos_config:
+        lines:
+          - "delete security address-book MORPHEUS_MANAGED address {{ item.1 }}"
+      loop: "{{ delta_map | dict2items | subelements('value.to_remove') }}"
+      loop_control:
+        label: "Orphan cleanup → {{ item.1 }}"
+      when: 
+        - delta_map | dict2items | selectattr('value.to_remove', 'ne', []) | list | length > 0
+        - item.1 not in (hostvars['localhost']['zone_map'].values() | flatten | unique)
 
     - name: No-op confirmation — SRX already matches desired state
       debug:
@@ -201,7 +207,6 @@
         | map(attribute='to_add')    | flatten | length == 0
         and delta_map.values()
         | map(attribute='to_remove') | flatten | length == 0
-
 
 # ── Phase 4 ── Build and publish topology snapshot for Grafana ───────────────
 - name: Phase 4 — Publish topology snapshot
