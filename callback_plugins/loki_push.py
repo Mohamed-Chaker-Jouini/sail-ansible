@@ -24,7 +24,7 @@ import time
 import urllib.error
 import urllib.request
 
-from ansible.plugins.callback import CallbackBase
+from ansible.plugins.callback import CallbackBase # type: ignore
 
 DOCUMENTATION = """
     name: loki_push
