@@ -1,0 +1,91 @@
+# =========================
+# Virtual Environments
+# =========================
+.venv/
+venv/
+env/
+ENV/
+
+# =========================
+# Python
+# =========================
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# =========================
+# Testing & Coverage (pytest)
+# =========================
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+*.cover
+*.py,cover
+htmlcov/
+.tox/
+.nox/
+
+# =========================
+# Type Checking
+# =========================
+.mypy_cache/
+.pyre/
+.typeguard/
+
+# =========================
+# Ansible
+# =========================
+*.retry
+
+# Vault password files (Security: NEVER commit these!)
+.vault_pass
+.vault_pass.txt
+vault-password-file
+.ansible-vault
+
+# Ignore downloaded Galaxy roles and collections
+# (Uncomment below if you install dependencies locally rather than globally)
+# collections/ansible_collections/
+# roles/galaxy/
+
+# =========================
+# OS & Editor / IDE
+# =========================
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+
+# VS Code / JetBrains / Vim
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
