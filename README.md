@@ -320,14 +320,18 @@ set security policies from-zone untrust to-zone {ZONE}_ZONE policy DENY_ALL_IN_{
 
 This ensures a misconfigured tag never exposes a VM before a human explicitly adds a permit policy.
 
-#### Task: Remove stale IPs
+#### Task: Remove stale IPs from zone set
 
-For each `(zone, ip)` pair in `to_remove`:
+For each `(zone, ip)` pair in `to_remove`, the IP is safely detached from the specific address-set it is leaving without deleting the base address object (to prevent Junos commit constraint errors if the IP is still referenced by another zone).
 
-```
 delete security address-book MORPHEUS_MANAGED address-set SET_{ZONE} address {ip}
+
+
+#### Task: Garbage collect orphaned IP address objects
+
+Runs after the zone set removals. It checks the master `zone_map` and deletes the base `address` object entirely **only if** the IP is no longer used by ANY desired zone.
+
 delete security address-book MORPHEUS_MANAGED address {ip}
-```
 
 #### Task: No-op confirmation
 
