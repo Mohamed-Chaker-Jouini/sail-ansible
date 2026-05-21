@@ -242,20 +242,21 @@
       vars:
         any_adds: "{{ delta_map.values() | map(attribute='to_add') | flatten | length > 0 }}"
         any_rems: "{{ delta_map.values() | map(attribute='to_remove') | flatten | length > 0 }}"
-        # A clean native filter pipeline that stays an array:
         discovered_new_zones: "{{ delta_map.keys() | reject('in', srx_zone_map.keys() | default([])) | list }}"
+        # Generate a stable unique run ID from the epoch timestamp + random hex.
+        # ansible_run_tags resolves to ['all'] on untagged runs — never use it as an ID.
+        run_id_value: "{{ 'sail-' + (lookup('pipe', 'date +%s') | string) + '-' + (lookup('password', '/dev/null chars=hexdigits length=6')) | lower }}"
       uri:
         url: "{{ fileserver_url }}/history"
         method: POST
         body_format: json
         body:
-          ts: "{{ lookup('pipe', 'date +%s') | int }}"
-          run_id: "{{ ansible_run_tags | default('job-' + lookup('password', '/dev/null chars=digits length=6')) }}"
-          vsrx_ip: "{{ vsrx_ip }}"
-          changed: "{{ any_adds or any_rems or (discovered_new_zones | length > 0) }}"
+          ts:        "{{ lookup('pipe', 'date +%s') | int }}"
+          run_id:    "{{ run_id_value }}"
+          vsrx_ip:   "{{ vsrx_ip }}"
+          changed:   "{{ any_adds or any_rems or (discovered_new_zones | length > 0) }}"
           delta_map: "{{ delta_map }}"
           new_zones: "{{ discovered_new_zones }}"
-          duration_s: 2.5
         headers:
           Content-Type: application/json
         validate_certs: no
